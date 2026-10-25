@@ -1,0 +1,93 @@
+{
+  "version": "1.0.0",
+  "source_repository": "ivanermolenko61-commits/ai-knowledge",
+  "source_commit": "68b1d9488d0137223feac7b8ff860a09fe6c3d5f",
+  "accepted_engine_commit": "0862098",
+  "files": {
+    ".gitattributes": {
+      "sha256": "b6eb8f9223303e55b86af7168c34b4f190d89c9e87f4141a3343d0a0b1ce8573",
+      "git_blob": "aa6895e1dd1e914cd3d5eec4f6adc70e89a80533",
+      "unchanged_from_source": true
+    },
+    "scripts/install-global.sh": {
+      "sha256": "a1b078d328f2e29cd997ee56def38a0bf2ab3ec6d48a35be6d5f3a45e7f86fec",
+      "git_blob": "8b7fb53fb20d0fd21121210496bd3cdbf785f3fd",
+      "unchanged_from_source": true
+    },
+    "scripts/test-install-global.sh": {
+      "sha256": "277357c994d6dee9e1d8001a439f61ba020687c495ab7203e1f8bd5ee2cb3481",
+      "git_blob": "2ba75ab8833c7a9549551b0588a5eb9e6ef6d3a7",
+      "unchanged_from_source": true
+    },
+    "skills/agentq/SKILL.md": {
+      "sha256": "63089b0ba11c92d05e5ed1fa2e4322a7528feeecee2867c87f7fc60dec80df2c",
+      "git_blob": "c0e46cf4ffb2614f83dbc6b7c20025cb6045ec4d",
+      "unchanged_from_source": true
+    },
+    "skills/agentq/agentq_global.py": {
+      "sha256": "9c4fd45a5e75f612174dbd077c9542a391224807569a60bedee6bcab651ce542",
+      "git_blob": "72ad2c596ac9c6a44b631f9b44e360ce02bec27e",
+      "unchanged_from_source": true
+    },
+    "skills/agentq/codex-review.sh": {
+      "sha256": "e5cfc1435a4e39d28ae7114be64b8abdbcbec1eac53bcaffdad5cbd9f9fee992",
+      "git_blob": "023eb8005465b4957aa679f8adf9eccc93727232",
+      "unchanged_from_source": true
+    },
+    "skills/agentq/selftest.py": {
+      "sha256": "91efe4ac65556617426fbb840c35434c81fdd7b8bb92677248e25422ee3f9f95",
+      "git_blob": "4d8e41ad36a71595af3b74661512a1246fc9a89e",
+      "unchanged_from_source": true
+    },
+    "global/agents/coder.md": {
+      "sha256": "8a44c6ff262d2e3a11712a8c76912243c4c444809270795af66df4ce16314058",
+      "git_blob": "13574e724372c5e755762198422f049319921f2b",
+      "unchanged_from_source": true
+    },
+    "global/agents/frontend.md": {
+      "sha256": "3066731345fa7707ed6d1664cda4c0ccd4b83dd5835ca701ba10fe7b44421930",
+      "git_blob": "62e037a26766fd073e0a1281584c2995be45b24e",
+      "unchanged_from_source": true
+    },
+    "global/agents/reviewer.md": {
+      "sha256": "bab63eec11a56a24a7c5aa7ccc0fd3963451c4b7f0c63a5f6ea5f3f52ec12a12",
+      "git_blob": "a935f5a49d23a01acc13363e2be2a7080d2709ec",
+      "unchanged_from_source": true
+    },
+    "global/scripts/agentsrules.py": {
+      "sha256": "f0e1215e0c2b58524dce478077751f537c3c3007494267b7e9caa85e9633320d",
+      "git_blob": "50538c90f321a6af0cbc14947840e3fa6406c53a",
+      "unchanged_from_source": true
+    },
+    "global/workflow/project-template.md": {
+      "sha256": "e456a1a485e8607b437bb717b705133c7d8ac8c928184fc7bc099ba8eab51b23",
+      "git_blob": "60d1b412a46d37040649119db4d24ee0f3bf76d9",
+      "unchanged_from_source": false
+    },
+    "global/workflow/executor-rules.md": {
+      "sha256": "e14068958c250d0113c0f0cf02205b2e02bdbdc1a8d72d3a191abb4b7e57698f",
+      "git_blob": "2c53008776df7ebed21c2946c9433cef10670b7f",
+      "unchanged_from_source": true
+    },
+    "global/CLAUDE.md": {
+      "sha256": "9ca2ac8283ec1982a19ea957d474a49e794f55bed954214017ee63863a271d65",
+      "git_blob": "11b7f5f6bf2a6b7d63eeaba26980bc54250569c4",
+      "unchanged_from_source": false
+    },
+    "README.md": {
+      "sha256": "536fd69c6d8bb376efbc59bca744a0bf8a598b7434baadf0f9f12e164b5c7af2",
+      "git_blob": "1a98c0d48a4125527451106a1abfc0931e36ace2",
+      "unchanged_from_source": false
+    },
+    "VERSION": {
+      "sha256": "59854984853104df5c353e2f681a15fc7924742f9a2e468c29af248dce45ce03",
+      "git_blob": "3eefcb9dd5b38e2c1dc061052455dd97bcd51e6c",
+      "unchanged_from_source": false
+    },
+    ".gitignore": {
+      "sha256": "72bd7da7f80f9d007b15b525f9b014bfaf78c03910c88379051ac532dec53d63",
+      "git_blob": "88f50b4b701478fb5da86b754af40853397689dd",
+      "unchanged_from_source": false
+    }
+  }
+}

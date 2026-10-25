@@ -1,0 +1,3 @@
+# bash-скрипты должны иметь LF, иначе ломаются в Git Bash после клона на Windows
+*.sh text eol=lf
+*.py text eol=lf
