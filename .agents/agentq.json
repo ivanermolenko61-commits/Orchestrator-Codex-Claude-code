@@ -1,0 +1,2 @@
+{"checks": {"backend": [["bash", "-n", "scripts/install-global.sh"], ["bash", "scripts/test-install-global.sh"]]},
+ "check_image": {"backend": "python:3.12-slim-bookworm"}, "check_timeout": 300}
