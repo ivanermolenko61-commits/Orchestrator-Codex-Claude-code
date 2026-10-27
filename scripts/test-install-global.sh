@@ -46,6 +46,13 @@ grep -q 'правка при откате' "$CLAUDE_HOME/agents/coder.md" && ok 
 [ "$(AQ_ALLOW_DOWNGRADE=1 run --apply)" = 0 ] && ok "AQ_ALLOW_DOWNGRADE=1 разрешает установку" || bad "AQ_ALLOW_DOWNGRADE не сработал"
 diff -q --strip-trailing-cr "$REPO/VERSION" "$CLAUDE_HOME/skills/agentq/VERSION" >/dev/null && ok "версия восстановлена" || bad "версия не восстановлена"
 
+# окончания строк CRLF в установленном VERSION не должны влиять на сравнение версий
+printf '%s\r\n' "$(tr -d ' \r\n' < "$REPO/VERSION")" > "$CLAUDE_HOME/skills/agentq/VERSION"
+[ "$(run)" = 0 ] && ok "VERSION с CRLF: та же версия не считается откатом" || bad "VERSION с CRLF: ложный отказ"
+printf '9.0.0\r\n' > "$CLAUDE_HOME/skills/agentq/VERSION"
+[ "$(run)" = 2 ] && ok "VERSION с CRLF: более новая версия отклоняется" || bad "VERSION с CRLF: откат не отклонён"
+[ "$(AQ_ALLOW_DOWNGRADE=1 run --apply)" = 0 ] && ok "после CRLF-проверок версия восстановлена" || bad "восстановление версии после CRLF-проверок"
+
 # неизвестный параметр не должен молча превращаться в сверку
 [ "$(run --aply)" = 2 ] && ok "неизвестный параметр: код 2" || bad "неизвестный параметр принят"
 

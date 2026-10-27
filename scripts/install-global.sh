@@ -20,16 +20,12 @@ for a in "$@"; do
 done
 STAMP="$(date +%Y%m%d-%H%M%S)"; BK="$DEST/backups/install-$STAMP"
 diffs=0
-VER="$(tr -d ' 
-' < "$REPO/VERSION" 2>/dev/null)"
+VER="$(tr -d ' \r\n' < "$REPO/VERSION" 2>/dev/null)"
 [ -n "$VER" ] || { echo "нет файла VERSION в репозитории" >&2; exit 2; }
 INST_VER_FILE="$DEST/skills/agentq/VERSION"
 if [ -f "$INST_VER_FILE" ] && [ "${AQ_ALLOW_DOWNGRADE:-0}" != 1 ]; then
-  cur="$(tr -d ' 
-' < "$INST_VER_FILE")"
-  if [ -n "$cur" ] && [ "$cur" != "$VER" ] && [ "$(printf '%s
-%s
-' "$cur" "$VER" | sort -V | tail -n 1)" = "$cur" ]; then
+  cur="$(tr -d ' \r\n' < "$INST_VER_FILE")"
+  if [ -n "$cur" ] && [ "$cur" != "$VER" ] && [ "$(printf '%s\n%s\n' "$cur" "$VER" | sort -V | tail -n 1)" = "$cur" ]; then
     echo "Установлена более новая версия agentq ($cur), в репозитории $VER. Обновите клон (git pull --ff-only); принудительно: AQ_ALLOW_DOWNGRADE=1" >&2
     exit 2
   fi
