@@ -10,6 +10,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -514,7 +515,7 @@ def t_budget_units_chain():
     n0 = q.count('codex-review')
     q.commit('backend/app.py', 'X = 101\n')
     rc, _, err = q.cr('review', 'u1')
-    check('продолжение: u1 (3/3) отказана, вызова нет', rc == 3 and q.count('codex-review') == n0, err)
+    check('продолжение: u1 (3/3, последние круги без прогресса) остановлена, вызова нет', rc == 3 and q.count('codex-review') == n0, err)
     q.commit('backend/b.py', 'X = 102\n')
     rc, _, _ = q.cr('review', 'u2')
     check('продолжение: u2 (1/3) получает ревью, чужой расход её не блокирует', rc == 1 and q.count('codex-review') == n0 + 1)
@@ -522,6 +523,7 @@ def t_budget_units_chain():
     def crash(s):   # сбой после receipt, до применения вердикта
         u = s['units']['u2']
         u['verdict'], u['reviewed'], u['review_applied'], u['status'] = None, None, 0, 'open'
+        u['stall'], u['progress'], u['rounds'] = 0, None, []   # вердикт и итог круга сохраняются одной записью: до неё круга ещё нет
     state_edit(q, crash)
     rc, _, _ = q.cr('review', 'u2')
     check('восстановление в продолжении: ответ применён по receipt, нового вызова нет', rc == 1 and q.count('codex-review') == n0 + 1)
@@ -529,7 +531,8 @@ def t_budget_units_chain():
     rc, _, _ = q.cr('review', 'u2')
     q.commit('backend/b.py', 'X = 104\n')
     rc4, _, err4 = q.cr('review', 'u2')
-    check('u2: вместе с перенесённым ровно 3 ревью, четвёртое отказано', rc == 1 and rc4 == 3 and q.count('codex-review') == n0 + 2, err4)
+    check('u2: два круга подряд без прогресса (замечания не закрыты) — четвёртое ревью остановлено до пересмотра подхода',
+          rc == 1 and rc4 == 3 and 'без прогресса' in err4 and q.count('codex-review') == n0 + 2, err4)
     st = json.loads((q.repo / '.ai/task/state.json').read_text(encoding='utf-8'))
     check('общий расход цепочки считается вместе с перенесённым', st['inherited']['calls'] == 6 and len(st['calls']) == 2, st['inherited'])
 
@@ -1178,6 +1181,460 @@ def t_review_fixes():
     check('finish не подтверждает приёмку после смены ветки', rc == 1 and 'НЕ ПОДТВЕРЖДЕНА' in out, out)
 
 
+FIX_T = {'text': '- [MAJOR] backend/app.py:2 — плохо.\nVERDICT: FIX'}
+FIXC_T = {'text': '- [MAJOR] backend/app.py:2 — осталось.\n[ЗАКРЫТО] прежнее замечание исправлено\nVERDICT: FIX'}
+BODY_T = 'def add(a, b):\n    return a + b  # {n}\n'
+NOTE_T = 'упростить: убрать вложенные ветки и проверить границы в одном месте'
+
+
+def rstate(x):
+    return json.loads((x.repo / '.ai/task/state.json').read_text(encoding='utf-8'))
+
+
+def rledger(x):
+    return json.loads((x.repo / '.ai/ledger.json').read_text(encoding='utf-8'))
+
+
+def review_n(x, n, uid=None):
+    """Коммит правки и ревью; возвращает (код, stdout, stderr)."""
+    x.commit('backend/app.py', BODY_T.format(n=n))
+    return x.cr('review', *([uid] if uid else []))
+
+
+def t_progress_policy():
+    """Контрольные точки 3/3/12 и контроль содержательного прогресса: закрытые замечания разрешают продолжение, два круга без прогресса
+    возвращают управление тимлиду, повторное зацикливание после пересмотра — окончательная остановка, явный предел Ивана жёсткий."""
+    p = Proj('prog')
+    p.cr('start', 'прогресс', '--id', 'pg-1', '--kind', 'backend')
+    p.script('codex', [FIX_T, FIXC_T, FIXC_T, FIXC_T, FIXC_T, {'text': 'VERDICT: PASS'}])
+    rcs = [review_n(p, n)[0] for n in range(1, 6)]
+    check('прогресс: контрольная точка (3 ревью) не запрещает продолжение — закрытые замечания, ревью 4 и 5 состоялись',
+          rcs == [1] * 5 and p.count('codex-review') == 5, rcs)
+    first = (p.fake / 'codex-prompt-0.txt').read_text(encoding='utf-8')
+    second = (p.fake / 'codex-prompt-1.txt').read_text(encoding='utf-8')
+    check('запрос reviewer: критерии готовности, границы, минимальное решение и доказательность BLOCKER/MAJOR',
+          all(x in first for x in ('КРИТЕРИИ ГОТОВНОСТИ', 'ГРАНИЦЫ', 'МИНИМАЛЬНОЕ ДОСТАТОЧНОЕ', 'ДОКАЗАТЕЛЬНОСТЬ', 'сценарий')), first[:300])
+    check('первое ревью без статусов прежних замечаний, повторное — со статусами [ЗАКРЫТО]/[ОСТАЛОСЬ]/[НОВОЕ] и прежним отчётом',
+          'СТАТУС ПРЕЖНИХ ЗАМЕЧАНИЙ' not in first and 'СТАТУС ПРЕЖНИХ ЗАМЕЧАНИЙ' in second and '[ОСТАЛОСЬ]' in second and '=== ПРОШЛЫЕ ЗАМЕЧАНИЯ ===' in second)
+    st = rstate(p)['units']['main']
+    check('история кругов в состоянии: прогресс по закрытию замечаний, а не по числу', st['stall'] == 0 and st['progress'] is True
+          and [r['progress'] for r in st['rounds']] == [True] * 4, st['rounds'])
+    rc, _, _ = review_n(p, 6)
+    n6 = p.count('codex-review')
+    rc2, out, _ = p.cr('review')
+    check('принятый неизменённый кандидат: повторное ревью не вызывает модель', rc == 0 and rc2 == 0 and p.count('codex-review') == n6 == 6 and 'уже проверен' in out, out)
+    rc, out, err = p.cr('finish')
+    check('после PASS и проверок: приёмка VERIFIED без дополнительных кругов', rc == 0 and 'ACCEPTANCE: VERIFIED' in out, out + err)
+
+    q = Proj('prog-stop')
+    q.cr('start', 'остановка', '--id', 'ps-1', '--kind', 'backend')
+    q.script('codex', [FIX_T, FIXC_T, FIX_T, FIX_T, FIX_T, FIX_T])
+    for n in (1, 2, 3):
+        review_n(q, n)
+    q.commit('backend/app.py', BODY_T.format(n=4))
+    rc, _, err = q.cr('review')
+    check('контрольная точка без подтверждённого прогресса последнего круга: ревью остановлено, вызова нет, подсказан rethink',
+          rc == 3 and 'контрольная точка' in err and 'rethink' in err and q.count('codex-review') == 3, err)
+    rc, _, err = q.cr('rethink', 'main', 'коротко')
+    check('rethink: короткое описание подхода отказано', rc == 2 and '20' in err, err)
+    rc, out, err = q.cr('rethink', 'main', NOTE_T)
+    check('rethink: причина и более простой подход записаны', rc == 0 and rstate(q)['units']['main']['rethinks'][0]['note'] == NOTE_T, out + err)
+    rc, _, err = q.cr('review')
+    prompt = sorted(q.fake.glob('codex-prompt-*.txt'), key=lambda f: int(f.stem.split('-')[-1]))[-1].read_text(encoding='utf-8')
+    check('после пересмотра круг разрешён, и новый подход идёт в запрос reviewer', rc == 1 and q.count('codex-review') == 4 and NOTE_T in prompt, err)
+    review_n(q, 5)
+    rc, _, err = q.cr('review')
+    check('повторное зацикливание после пересмотра: окончательная остановка с блокером, выполненной работой и рекомендацией, вызова нет',
+          rc == 3 and 'повторное зацикливание' in err and 'Рекомендуемое решение' in err and 'выполнено' in err and q.count('codex-review') == 4, err)
+    rc, _, err = q.cr('rethink', 'main', NOTE_T + ' ещё раз')
+    check('второй пересмотр на той же единице невозможен', rc == 3 and q.count('codex-review') == 4, err)
+    rc, out, _ = q.cr('status')
+    check('status показывает круги без прогресса и факт пересмотра', 'без прогресса подряд' in out and 'пересмотр подхода был' in out, out)
+
+    s = Proj('prog-stall')
+    s.cr('start', 'два круга', '--id', 'pst-1', '--kind', 'backend')
+    s.script('codex', [FIX_T] * 5)
+    for n in (1, 2, 3):
+        review_n(s, n)
+    rc, _, err = review_n(s, 4)
+    check('два круга подряд без прогресса: автоматическая передача остановлена, вызова нет, управление тимлиду', rc == 3 and 'СТОП' in err and 'другой, более простой подход' in err
+          and s.count('codex-review') == 3, err)
+    rc, _, err = s.cr('rethink', 'main', NOTE_T)
+    rc2, _, _ = s.cr('review')
+    check('после пересмотра подхода тимлидом круг возобновляется', rc == 0 and rc2 == 1 and s.count('codex-review') == 4, err)
+
+    h = Proj('prog-hard')
+    h.cr('start', 'предел', '--id', 'ph-1', '--kind', 'backend', '--max-calls', '2')
+    h.script('codex', [FIXC_T] * 4)
+    review_n(h, 1)
+    review_n(h, 2)
+    rc, _, err = review_n(h, 3)
+    check('явный предел Ивана жёсткий даже при прогрессе: третий вызов отказан', rc == 3 and 'предел' in err.lower() and h.count('codex-review') == 2, err)
+    h.cr('finish', '--abandon')
+    check('предел записан в журнал', rledger(h)[0]['max_calls'] == 2)
+    rc, _, err = h.cr('start', 'предел', '--id', 'ph-2', '--kind', 'backend', '--continues', 'ph-1')
+    check('продолжение не поднимает предел Ивана: старт отказан', rc == 3 and 'предел' in err.lower() and not (h.repo / '.ai/task/state.json').exists(), err)
+
+    c = Proj('prog-chain')
+    c.cr('start', 'цепочка', '--id', 'pc-1', '--kind', 'backend')
+    c.script('codex', [FIX_T] * 3)
+    state_edit(c, lambda s: s.update(inherited={'author': 0, 'review': 12, 'calls': 12, 'units': {}, 'verdicts': {}, 'meta': {}}))
+    rc, _, err = review_n(c, 1)
+    check('контрольная точка цепочки (12 вызовов) без подтверждённого прогресса: вызова нет', rc == 3 and '12/12' in err and c.count('codex-review') == 0, err)
+    state_edit(c, lambda s: s['units']['main'].update(progress=True))
+    rc, _, err = c.cr('review')
+    check('с подтверждённым прогрессом цепочка продолжается за 12', rc == 1 and c.count('codex-review') == 1, err)
+
+
+def t_cont_a():
+    """Продолжение (--continues): расход и история прогресса принадлежат работе; неподдерживаемые операции — безопасный отказ."""
+    a = Proj('contA', extra={'backend/b.py': 'B = 1\n'})
+    a.cr('start', 'работа', '--id', 'ca-1', '--kind', 'mixed', '--contract-file', a.contract())
+    a.cr('unit', 'main', '--kind', 'backend', '--files', 'backend/app.py')
+    a.cr('unit', 'other', '--kind', 'backend', '--files', 'backend/b.py')
+    a.cr('unit', 'prot', '--kind', 'protected', '--files', 'package.json')
+    a.script('codex', [FIX_T] * 12)
+    for n in range(3):
+        a.commit('backend/app.py', BODY_T.format(n=n))
+        a.cr('review', 'main')
+    a.commit('package.json', '{"a": 1}\n')
+    a.cr('review', 'prot')
+    a.cr('finish', '--abandon')
+    n0 = a.count('codex-review')
+    a.cr('start', 'работа', '--id', 'ca-2', '--kind', 'mixed', '--contract-file', a.contract(), '--continues', 'ca-1')
+    for uid, kind, files in (('retry', 'backend', ['backend/app.py']), ('ab', 'backend', ['backend/app.py', 'backend/b.py']),
+                             ('prot2', 'backend', ['package.json'])):
+        rc, _, err = a.cr('unit', uid, '--kind', kind, '--files', *files)
+        check(f'A: {uid} (переименование/объединение/смена рода под новым uid) — безопасный отказ, единица не создана',
+              rc == 2 and 'пересекается' in err and uid not in rstate(a)['units'], err)
+    rc, _, err = a.cr('unit', 'other', '--kind', 'backend', '--files', 'backend/b.py')
+    check('A: единица без расхода, не пересекающаяся с прежней работой, создаётся', rc == 0, err)
+    rc, _, err = a.cr('unit', 'prot', '--kind', 'backend', '--files', 'package.json')
+    check('A: тот же uid и то же семейство ролей (protected → backend) продолжает работу, а не открывает новый бюджет', rc == 0, err)
+    a.cr('unit', 'main', '--kind', 'backend', '--files', 'backend/app.py')
+    rc, out, _ = a.cr('status')
+    check('A: тот же uid наследует расход и историю прогресса (ревью 3/3, два круга без прогресса)',
+          'main: backend' in out and 'ревью 3/3' in out and 'без прогресса подряд 2' in out and 'ревью 1/3' in out, out)
+    a.commit('backend/app.py', BODY_T.format(n=9))
+    rc, _, err = a.cr('review', 'main')
+    check('A: остановка по прогрессу сохраняется в продолжении: вызова нет', rc == 3 and 'СТОП' in err and a.count('codex-review') == n0, err)
+    rc, _, err = a.cr('rethink', 'main', NOTE_T)
+    rc2, _, _ = a.cr('review', 'main')
+    check('A: пересмотр подхода в продолжении разрешает круг', rc == 0 and rc2 == 1 and a.count('codex-review') == n0 + 1, err)
+    a.cr('finish', '--abandon')
+    a.cr('start', 'работа', '--id', 'ca-3', '--kind', 'mixed', '--contract-file', a.contract(), '--continues', 'ca-2')
+    a.cr('unit', 'main', '--kind', 'backend', '--files', 'backend/app.py')
+    check('A: пересмотр подхода переносится по цепочке (второго нет)', len(rstate(a)['units']['main']['rethinks']) == 1)
+
+    L = Proj('contL')
+    L.cr('start', 'работа', '--id', 'cl-1', '--kind', 'backend')
+    L.script('codex', [FIX_T] * 12)
+    for n in range(3):
+        review_n(L, n)
+    L.cr('finish', '--abandon')
+    led = rledger(L)
+    led[0].pop('unit_meta', None)
+    (L.repo / '.ai/ledger.json').write_text(json.dumps(led), encoding='utf-8')
+    L.cr('start', 'работа', '--id', 'cl-2', '--kind', 'mixed', '--contract-file', L.contract(), '--continues', 'cl-1')
+    rc, _, err = L.cr('unit', 'retry', '--kind', 'backend', '--files', 'backend/app.py')
+    check('A: журнал прежней версии, новый uid не сопоставить: отказ с причиной', rc == 2 and 'нельзя сопоставить' in err and 'retry' not in rstate(L)['units'], err)
+    rc, _, err = L.cr('unit', 'main', '--kind', 'backend', '--files', 'backend/app.py')
+    check('A: журнал прежней версии, прежний uid: принят, основание diff — база прежней задачи', rc == 0 and rstate(L)['units']['main']['base'] == led[0]['base'], err)
+    n0 = L.count('codex-review')
+    rc, _, err = review_n(L, 9, 'main')
+    check('A: расход прежней версии учтён: контрольная точка 3/3 без подтверждённого прогресса — вызова нет', rc == 3 and L.count('codex-review') == n0, err)
+
+
+def t_cont_g():
+    """Продолжение (--continues): исходная база, все прежние замечания; потерянный отчёт — остановка до вызова (G)."""
+    g = Proj('contG')
+    g.cr('start', 'работа', '--id', 'cg-1', '--kind', 'backend')
+    base0 = g.git('rev-parse', 'HEAD')
+    g.script('codex', [FIX_T] * 6)
+    g.commit('backend/app.py', 'def add(a, b):\n    return a + b  # MARKER_FIRST\n')
+    g.cr('review')
+    rep1 = rstate(g)['units']['main']['last_report']
+    g.cr('finish', '--abandon')
+    g.cr('start', 'работа', '--id', 'cg-2', '--kind', 'backend', '--continues', 'cg-1')
+    check('G: база единицы продолжения — исходная база прежней работы', rstate(g)['units']['main']['base'] == base0)
+    g.commit('backend/app.py', 'def add(a, b):\n    return a + b  # MARKER_FIRST\n\n\ndef sub(a, b):\n    return a - b\n')
+    n0 = g.count('codex-review')
+    os.replace(rep1, rep1 + '.moved')
+    rc, _, err = g.cr('review')
+    check('G: отчёт прежнего ревью потерян — ревью не запускается, вызова нет', rc == 2 and 'не найден' in err and g.count('codex-review') == n0, err)
+    os.replace(rep1 + '.moved', rep1)
+    rc, _, err = g.cr('review')
+    prompt = sorted(g.fake.glob('codex-prompt-*.txt'), key=lambda f: int(f.stem.split('-')[-1]))[-1].read_text(encoding='utf-8')
+    diff = prompt.split('=== DIFF ===')[-1]
+    check('G: ревью продолжения видит изменения прежней работы (добавленная строка первой задачи в diff)',
+          rc == 1 and any(x.startswith('+') and 'MARKER_FIRST' in x for x in diff.splitlines()), err)
+    check('G: прежние замечания идут в запрос дословно', 'ПРОШЛЫЕ ЗАМЕЧАНИЯ' in prompt and Path(rep1).read_text(encoding='utf-8').strip() in prompt)
+
+    L = Proj('contGL')
+    L.cr('start', 'работа', '--id', 'gl-1', '--kind', 'backend')
+    L.script('codex', [FIX_T] * 3)
+    review_n(L, 1)
+    L.cr('finish', '--abandon')
+    led = rledger(L)
+    led[0].pop('unit_meta', None)
+    (L.repo / '.ai/ledger.json').write_text(json.dumps(led), encoding='utf-8')
+    for f in (L.repo / '.ai/reviews').glob('*.md'):
+        f.unlink()
+    L.cr('start', 'работа', '--id', 'gl-2', '--kind', 'backend', '--continues', 'gl-1')
+    n0 = L.count('codex-review')
+    rc, _, err = review_n(L, 2)
+    check('G: у прежней единицы были ревью, отчёт журнала прежней версии потерян — остановка до вызова, не «замечаний нет»',
+          rc == 2 and 'не найден' in err and L.count('codex-review') == n0, err)
+
+
+def t_cont_f():
+    """Продолжение: интегрированная frontend-единица не ломает backend-ревью и сохраняет исходную базу (G, регрессия)."""
+    p = Proj('contF')
+    p.cr('start', 'фронт и бэк', '--id', 'cf-1', '--kind', 'backend')
+    base0 = p.git('rev-parse', 'HEAD')
+    p.cr('unit', 'ui', '--kind', 'frontend', '--files', *FE_FILES)
+    p.script('codex', [{'files': FILES_OK1}, FIX_T, FIX_T, FIX_T])
+    p.script('claude', [OK, OK])
+    rc, out, err = p.cr('cycle', 'ui')
+    rc2, out2, err2 = p.cr('integrate', 'ui')
+    check('F: frontend-единица проверена и интегрирована', rc == 0 and rc2 == 0, out + err + out2 + err2)
+    review_n(p, 1, 'main')
+    p.cr('finish', '--abandon')
+    p.cr('start', 'фронт и бэк', '--id', 'cf-2', '--kind', 'backend', '--continues', 'cf-1')
+    main = rstate(p)['units']['main']
+    check('F: исключение принятых файлов frontend перенесено вместе с исходной базой', sorted(main['carried_exclude']) == sorted(FE_FILES) and main['base'] == base0, main)
+    rc, out, err = review_n(p, 2)
+    check('F: backend-ревью после интегрированной frontend-единицы не отвергается ложной ошибкой РОЛЬ', rc == 1 and 'РОЛЬ' not in err and p.count('codex-review') == 2, out + err)
+    p.commit('frontend/src/App.tsx', APP_V2)
+    rc, _, err = p.cr('review')
+    check('F: правка принятых файлов frontend без их единицы не проходит незамеченной', rc == 2 and 'прежних принятых единиц' in err and p.count('codex-review') == 2, err)
+    rc, _, err = p.cr('unit', 'ui', '--kind', 'frontend', '--files', *FE_FILES)
+    ui = rstate(p)['units']['ui']
+    check('F: frontend-единица продолжения: ревью берёт исходную базу прежней работы, а база рабочей копии автора не закрепляется заранее',
+          rc == 0 and ui['review_base'] == base0 and ui['base'] is None, err + str(ui))
+
+
+def t_cont_c():
+    """Продолжение: журнал проверяется на согласованность до любых вызовов, в том числе после start (C)."""
+    c = Proj('contC')
+    c.cr('start', 'работа', '--id', 'cc-1', '--kind', 'backend')
+    c.script('codex', [FIX_T] * 12)
+    for n in range(3):
+        review_n(c, n)
+    c.cr('finish', '--abandon')
+    good = rledger(c)
+    lp = c.repo / '.ai/ledger.json'
+    cases = {
+        'перенесённых больше вызовов': lambda e: e[0].update(inherited_calls=4),
+        'вызовов меньше расхода по ролям': lambda e: e[0].update(calls=1),
+        'вызовов больше расхода по ролям': lambda e: e[0].update(calls=9),
+        'перенесённые не равны расходу цепочки': lambda e: e[0].update(inherited_calls=2),
+        'единицы не сходятся с ролями': lambda e: e[0]['units']['main'].update(review=0),
+        'вызовы не число': lambda e: e[0].update(calls='три'),
+        'отрицательные роли': lambda e: e[0]['roles'].update(review=-3, author=6),
+        'повторный id': lambda e: e.append(json.loads(json.dumps(e[0]))),
+        'неизвестный результат': lambda e: e[0].update(result='OK'),
+        'предел вызовов не число': lambda e: e[0].update(max_calls='два'),
+        'вердикт не разобран': lambda e: e[0].update(verdicts={'main': {'value': 'ДА', 'sha': 'x'}}),
+        'запись не объект': lambda e: e.__setitem__(0, 7),
+    }
+    for name, mut in cases.items():
+        e = json.loads(json.dumps(good))
+        mut(e)
+        lp.write_text(json.dumps(e), encoding='utf-8')
+        raw = lp.read_bytes()
+        n0 = c.count('codex-review')
+        rc, _, err = c.cr('start', 'работа', '--id', 'cc-2', '--kind', 'backend', '--continues', 'cc-1')
+        check(f'C: {name} — остановка до состояния и вызовов, журнал не изменён',
+              rc == 2 and 'журнал повреждён' in err and 'Traceback' not in err and not (c.repo / '.ai/task/state.json').exists()
+              and lp.read_bytes() == raw and c.count('codex-review') == n0, err[-200:])
+    for name, raw in (('обрыв записи', json.dumps(good)[:40]), ('не список', '{"a": 1}')):
+        lp.write_text(raw, encoding='utf-8')
+        rc, _, err = c.cr('start', 'работа', '--id', 'cc-2', '--kind', 'backend', '--continues', 'cc-1')
+        check(f'C: {name} — остановка с понятной ошибкой, без трассировки', rc == 2 and 'Traceback' not in err and not (c.repo / '.ai/task/state.json').exists(), err[-200:])
+    lp.write_text(json.dumps(good), encoding='utf-8')
+    rc, _, err = c.cr('start', 'работа', '--id', 'cc-2', '--kind', 'backend', '--continues', 'cc-1')
+    st = rstate(c) if rc == 0 else {}
+    check('C: исправный журнал принимается, расход цепочки перенесён, контрольные точки не изменены', rc == 0 and st['inherited']['calls'] == 3 and st['budget']['total'] == 12, err)
+    n0 = c.count('codex-review')
+    lp.write_text(json.dumps(good)[:40], encoding='utf-8')   # повреждение после start, до следующего платного вызова
+    rc, _, err = review_n(c, 50)
+    check('C: журнал повреждён после start — остановка ДО платного вызова, а не на finish', rc == 2 and 'журнал повреждён' in err and c.count('codex-review') == n0, err[-200:])
+    lp.write_text(json.dumps(good), encoding='utf-8')
+    c.cr('rethink', 'main', NOTE_T)
+    rc, _, err = c.cr('review')
+    check('C: журнал восстановлен — работа продолжается без потери состояния', rc == 1 and c.count('codex-review') == n0 + 1, err)
+    c.cr('finish', '--abandon')
+    rc, _, err = c.cr('start', 'работа', '--id', 'cc-3', '--kind', 'backend', '--continues', 'cc-2')
+    check('C: цепочка из трёх задач согласована', rc == 0 and rstate(c)['inherited']['calls'] == 4, err)
+    (c.repo / '.ai/task/state.json').write_text('[]', encoding='utf-8')
+    rc, _, err = c.cr('status')
+    check('C: состояние задачи неверного типа — остановка с понятной ошибкой, без трассировки',
+          rc == 2 and 'повреждено' in err and 'Traceback' not in err, err[-200:])
+
+
+def t_cont_h():
+    """Независимая приёмка 1: область, принятый результат, проверки и остановка при продолжении; журнал без разбивки по единицам."""
+    a = Proj('contH', extra={'backend/b.py': 'B = 1\n'})
+    a.cr('start', 'работа', '--id', 'ch-1', '--kind', 'mixed', '--contract-file', a.contract())
+    a.cr('unit', 'p1', '--kind', 'backend', '--files', 'backend/app.py')
+    a.cr('unit', 'p2', '--kind', 'backend', '--files', 'backend/b.py', 'package.json')
+    a.script('codex', [{'text': 'VERDICT: PASS'}, FIX_T, FIX_T])
+    a.commit('backend/app.py', BODY_T.format(n=1))
+    a.cr('review', 'p1')
+    a.commit('backend/b.py', 'B = 2\n')
+    a.cr('review', 'p2')
+    a.cr('finish', '--abandon')
+    a.cr('start', 'работа', '--id', 'ch-2', '--kind', 'backend', '--continues', 'ch-1')
+    check('H: единица без файлов (вся задача) не обходит сопоставление с прежними единицами с файлами: старт отказан, состояние не создано',
+          not (a.repo / '.ai/task/state.json').exists())
+    a.cr('start', 'работа', '--id', 'ch-2', '--kind', 'mixed', '--contract-file', a.contract(), '--continues', 'ch-1')
+    rc, _, err = a.cr('unit', 'p2', '--kind', 'backend', '--files', 'backend/b.py')
+    check('H: сужение области той же единицы при продолжении отказано (изменения вне нового списка ушли бы из ревью)',
+          rc == 2 and 'область единицы' in err and 'p2' not in rstate(a)['units'], err)
+    n0 = a.count('codex-review')
+    a.cr('unit', 'p1', '--kind', 'backend', '--files', 'backend/app.py')
+    u = rstate(a)['units']['p1']
+    check('H: принятый неизменённый результат прежней работы остаётся принятым (PASS на том же SHA), модель не вызывается',
+          u['status'] == 'accepted' and u['verdict']['value'] == 'PASS' and u['reviewed'] == u['verdict']['sha'] and a.count('codex-review') == n0, u)
+
+    c = Proj('contH2')
+    c.cr('start', 'проверки', '--id', 'cp-1', '--kind', 'backend')
+    c.script('codex', [FIX_T] * 6)
+    review_n(c, 1)
+    c.commit('backend/app.py', BODY_T.format(n=2) + '# FAIL_test\n')
+    rc, _, _ = c.cr('review')
+    check('H: падающие проверки при открытых замечаниях — круг без прогресса, модель не вызывалась', rc == 1 and c.count('codex-review') == 1 and rstate(c)['units']['main']['open_checks'], rc)
+    c.cr('finish', '--abandon')
+    c.cr('start', 'проверки', '--id', 'cp-2', '--kind', 'backend', '--continues', 'cp-1')
+    check('H: состояние «проверки падали» переносится при продолжении', rstate(c)['units']['main']['open_checks'] is True)
+    rc, _, err = review_n(c, 3)
+    m = rstate(c)['units']['main']
+    check('H: исправление проверок и ревью на одном кандидате — один круг с прогрессом (не два, не затёрт результатом ревью)',
+          rc == 1 and m['progress'] is True and m['stall'] == 0 and len(m['rounds']) == 1 and 'исправлены падавшие проверки' in m['rounds'][-1]['why']
+          and 'ревью FIX' in m['rounds'][-1]['why'], m)
+
+    s = Proj('contH3')
+    s.cr('start', 'остановка', '--id', 'cs-1', '--kind', 'backend')
+    s.script('codex', [FIX_T] * 6)
+    for n in (1, 2, 3):
+        review_n(s, n)
+    s.commit('backend/app.py', BODY_T.format(n=4) + '# FAIL_test\n')
+    s.cr('review')
+    n0 = s.count('codex-review')
+    rc, _, err = review_n(s, 5)
+    check('H: исправление проверок не снимает уже наступившую остановку (нужен rethink): вызова нет',
+          rc == 3 and 'СТОП' in err and s.count('codex-review') == n0 and rstate(s)['units']['main']['stall'] == 2, err)
+
+    d = Proj('contH4')
+    d.cr('start', 'старый журнал', '--id', 'cd-1', '--kind', 'backend')
+    d.script('codex', [FIX_T])
+    review_n(d, 1)
+    d.cr('finish', '--abandon')
+    led = rledger(d)
+    led[0].pop('units'), led[0].pop('unit_meta')
+    (d.repo / '.ai/ledger.json').write_text(json.dumps(led), encoding='utf-8')
+    rc, _, err = d.cr('start', 'старый журнал', '--id', 'cd-2', '--kind', 'backend', '--continues', 'cd-1')
+    check('H: журнал прежней версии без разбивки по единицам: замечания не восстановить — продолжение отказано, а не «замечаний нет»',
+          rc == 2 and 'без описаний' in err and not (d.repo / '.ai/task/state.json').exists(), err)
+
+
+def t_cont_i():
+    """Независимая приёмка 2: принятая frontend-единица, круг по проверкам после прерывания, смешанный журнал старых форматов."""
+    f = Proj('contI')
+    f.cr('start', 'фронт', '--id', 'ci-1', '--kind', 'mixed', '--contract-file', f.contract())
+    f.cr('unit', 'ui', '--kind', 'frontend', '--files', *FE_FILES)
+    f.cr('unit', 'p2', '--kind', 'backend', '--files', 'backend/app.py')
+    f.script('codex', [{'files': FILES_OK1}, FIX_T])
+    f.script('claude', [OK])
+    rc, _, _ = f.cr('cycle', 'ui')
+    rc2, _, _ = f.cr('integrate', 'ui')
+    f.commit('backend/app.py', BODY_T.format(n=1))
+    f.cr('review', 'p2')
+    f.cr('finish', '--abandon')
+    f.cr('start', 'фронт', '--id', 'ci-2', '--kind', 'mixed', '--contract-file', f.contract(), '--continues', 'ci-1')
+    f.cr('unit', 'ui', '--kind', 'frontend', '--files', *FE_FILES)
+    n0 = len(f.calls())
+    rc3, _, err = f.cr('cycle', 'ui')
+    ui = rstate(f)['units']['ui']
+    check('I: принятая и интегрированная frontend-единица остаётся принятой при продолжении: автор и reviewer не вызываются',
+          rc == 0 and rc2 == 0 and rc3 == 0 and ui['status'] == 'integrated' and ui['verdict']['value'] == 'PASS' and len(f.calls()) == n0, err + str(ui))
+
+    c = Proj('contI2')
+    c.cr('start', 'проверки', '--id', 'cj-1', '--kind', 'backend')
+    c.script('codex', [FIX_T] * 4)
+    review_n(c, 1)
+    prev = {k: rstate(c)['units']['main'][k] for k in ('verdict', 'reviewed', 'last_report', 'review_applied')}
+    c.commit('backend/app.py', BODY_T.format(n=2) + '# FAIL_test\n')
+    c.cr('review')
+    review_n(c, 3)
+    n0 = c.count('codex-review')
+    state_edit(c, lambda s: s['units']['main'].update(prev))   # прерывание после засчитанного круга по проверкам, до применения вердикта ревью
+    rc, _, err = c.cr('review')
+    m = rstate(c)['units']['main']
+    check('I: после прерывания круг по исправленным проверкам не заменяется «без прогресса» результатом ревью того же кандидата',
+          rc == 1 and c.count('codex-review') == n0 and m['progress'] is True and m['stall'] == 0 and len([r for r in m['rounds'] if r['sha'] == m['reviewed']]) == 1, m['rounds'])
+
+    r = Proj('contI4')
+    r.cr('start', 'без вызовов', '--id', 'cr-1', '--kind', 'mixed', '--contract-file', r.contract())
+    r.cr('unit', 'xx', '--kind', 'backend', '--files', 'backend/app.py')
+    for n in (1, 2, 3):
+        r.commit('backend/app.py', BODY_T.format(n=n) + '# FAIL_test\n')
+        r.cr('review', 'xx')
+    st = rstate(r)['units']['xx']
+    r.cr('finish', '--abandon')
+    r.cr('start', 'без вызовов', '--id', 'cr-2', '--kind', 'mixed', '--contract-file', r.contract(), '--continues', 'cr-1')
+    rc, _, err = r.cr('unit', 'yy', '--kind', 'backend', '--files', 'backend/app.py')
+    check('I: переименование единицы с историей кругов без прогресса, но без платных вызовов, отказано (stop не обходится новым uid)',
+          st['stall'] == 2 and r.count('codex-review') == 0 and rc == 2 and 'пересекается' in err and 'yy' not in rstate(r)['units'], err + str(st['stall']))
+
+    w = Proj('contI5', extra={'backend/b.py': 'B = 1'+chr(10)})
+    w.cr('start', 'вся задача', '--id', 'cw-1', '--kind', 'backend')
+    w.cr('unit', 'oth', '--kind', 'backend', '--files', 'backend/b.py')
+    w.script('codex', [{'text': 'VERDICT: PASS'}, FIX_T])
+    review_n(w, 1, 'main')
+    w.commit('backend/b.py', 'B = 2'+chr(10))
+    w.cr('review', 'oth')
+    w.cr('finish', '--abandon')
+    n0 = w.count('codex-review')
+    w.cr('start', 'вся задача', '--id', 'cw-2', '--kind', 'backend', '--continues', 'cw-1')
+    mn = rstate(w)['units']['main']
+    check('I: принятая неизменённая единица без списка файлов (вся задача) остаётся принятой при продолжении, модель не вызывается',
+          mn['status'] == 'accepted' and mn['verdict']['value'] == 'PASS' and w.count('codex-review') == n0, mn)
+
+    z = Proj('contI6')
+    z.cr('start', 'без расхода', '--id', 'cz-1', '--kind', 'mixed', '--contract-file', z.contract())
+    z.cr('unit', 'api', '--kind', 'backend', '--files', 'backend/app.py')
+    z.commit('backend/app.py', BODY_T.format(n=1))
+    z.cr('finish', '--abandon')
+    z.cr('start', 'без расхода', '--id', 'cz-2', '--kind', 'mixed', '--contract-file', z.contract(), '--continues', 'cz-1')
+    rc, _, err = z.cr('unit', 'api2', '--kind', 'backend', '--files', 'backend/app.py')
+    check('I: переименование прежней единицы вообще без расхода отказано (иначе исходная реализация осталась бы вне базы ревью)',
+          rc == 2 and 'пересекается' in err and 'api2' not in rstate(z)['units'], err)
+    rc, _, err = z.cr('unit', 'api', '--kind', 'backend', '--files', 'backend/app.py')
+    check('I: тот же uid без расхода продолжает работу с исходной базой', rc == 0 and rstate(z)['units']['api']['base'] != z.git('rev-parse', 'HEAD'), err)
+
+    n = Proj('contI7', extra={'backend/legacy.py': '# FAIL_test' + chr(10)})   # проверка красная и на базе: результат «не подтверждено» (ok=None)
+    n.cr('start', 'не подтверждено', '--id', 'cn-1', '--kind', 'backend')
+    n.script('codex', [FIX_T] * 3)
+    state_edit(n, lambda s: s['units']['main'].update(open_checks=True, open_review=True, progress=False))
+    rc, _, err = review_n(n, 1)
+    m = rstate(n)['units']['main']
+    check('I: проверки «не подтверждено» (красные и на базе) не засчитываются как исправление: прогресса нет, состояние «проверки падали» сохраняется, модель не вызвана',
+          rc != 0 and m['progress'] is False and m['open_checks'] is True and not m['rounds'] and n.count('codex-review') == 0, str(m['rounds']) + err[-200:])
+
+    d = Proj('contI3')
+    (d.repo / '.ai').mkdir(exist_ok=True)
+    head = d.git('rev-parse', 'HEAD')
+    common = {'goal_sha': 'a', 'base': head, 'result': 'NOT_ACCEPTED', 'chain': 'x-1'}
+    led = [{**common, 'id': 'x-1', 'roles': {'author': 0, 'review': 1}, 'calls': 1, 'inherited_calls': 0, 'resolved': True, 'continued_by': 'x-2'},
+           {**common, 'id': 'x-2', 'roles': {'author': 1, 'review': 0}, 'units': {'main': {'author': 1, 'review': 0}}, 'calls': 2, 'inherited_calls': 1}]
+    (d.repo / '.ai/ledger.json').write_text(json.dumps(led), encoding='utf-8')
+    rc, _, err = d.cr('start', 'смешанный журнал', '--id', 'x-3', '--kind', 'backend', '--continues', 'x-2')
+    check('I: цепочка старых форматов (часть расхода без разбивки по единицам) — отказ, более поздние описания замечаний не восстанавливают',
+          rc == 2 and 'без описаний' in err and not (d.repo / '.ai/task/state.json').exists(), err)
+
+
 def t_links():
     eng = load_engine()
     d = Path(tempfile.mkdtemp(prefix='aq-selftest-links-'))
@@ -1201,7 +1658,7 @@ def t_links():
 def main():
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding='utf-8', errors='replace')
-    for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links,
+    for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links,
               t_unavailable_and_modes):
         try:
             t()

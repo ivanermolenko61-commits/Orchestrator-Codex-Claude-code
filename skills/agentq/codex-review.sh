@@ -7,6 +7,9 @@
 #   codex-review.sh cycle <uid> [low|medium|high]    — frontend: автор Codex → проверки → ревью Claude → исправления
 #   codex-review.sh review [uid] [low|medium|high] [--full]   — независимое ревью другим сервисом
 #   codex-review.sh integrate <uid> | status | finish
+#   codex-review.sh rethink <uid> "<причина и более простой подход>"
+#                                            — после остановки за 2 круга без прогресса: пересмотр подхода (один раз на единицу)
+#   codex-review.sh start … --max-calls N    — жёсткий предел вызовов цепочки (только по решению Ивана)
 #
 # Коды выхода: 0 PASS/ok, 1 FIX, 2 ERROR/блокер, 3 LIMIT, 4 BUSY; route: 0 готово, 10/12 проектный координатор, 11 не хватает настроек.
 set -uo pipefail
