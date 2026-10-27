@@ -35,4 +35,37 @@ bk="$(find "$CLAUDE_HOME/backups" -path '*agents/coder.md' 2>/dev/null | head -n
 sed -i 's/$/\r/' "$CLAUDE_HOME/agents/coder.md"
 [ "$(run)" = 0 ] && ok "различие только в CRLF допускается" || bad "CRLF считается расхождением"
 
+# версия пакета устанавливается рядом с навыком
+diff -q --strip-trailing-cr "$REPO/VERSION" "$CLAUDE_HOME/skills/agentq/VERSION" >/dev/null && ok "VERSION установлена" || bad "VERSION не установлена"
+
+# защита от отката: более новая установленная версия не перезаписывается
+echo "9.0.0" > "$CLAUDE_HOME/skills/agentq/VERSION"
+echo "правка при откате" >> "$CLAUDE_HOME/agents/coder.md"
+[ "$(run --apply)" = 2 ] && ok "откат версии отклонён (код 2)" || bad "откат версии не отклонён"
+grep -q 'правка при откате' "$CLAUDE_HOME/agents/coder.md" && ok "при отказе файлы не менялись" || bad "при отказе файлы изменены"
+[ "$(AQ_ALLOW_DOWNGRADE=1 run --apply)" = 0 ] && ok "AQ_ALLOW_DOWNGRADE=1 разрешает установку" || bad "AQ_ALLOW_DOWNGRADE не сработал"
+diff -q --strip-trailing-cr "$REPO/VERSION" "$CLAUDE_HOME/skills/agentq/VERSION" >/dev/null && ok "версия восстановлена" || bad "версия не восстановлена"
+
+# неизвестный параметр не должен молча превращаться в сверку
+[ "$(run --aply)" = 2 ] && ok "неизвестный параметр: код 2" || bad "неизвестный параметр принят"
+
+# --core-only: личные инструкции владельца не трогаются, оркестратор ставится
+H2="$T/claude-core"
+mkdir -p "$H2/workflow"
+echo "личные правила" > "$H2/CLAUDE.md"
+echo "личный шаблон" > "$H2/workflow/project-template.md"
+[ "$(CLAUDE_HOME="$H2" run --apply --core-only)" = 0 ] && ok "--core-only: код 0" || bad "--core-only: код"
+grep -qx 'личные правила' "$H2/CLAUDE.md" && grep -qx 'личный шаблон' "$H2/workflow/project-template.md" && ok "--core-only: личные файлы не изменены" || bad "--core-only: личные файлы изменены"
+{ [ -f "$H2/skills/agentq/agentq_global.py" ] && [ -f "$H2/agents/coder.md" ] && [ -f "$H2/scripts/agentsrules.py" ]; } && ok "--core-only: оркестратор установлен" || bad "--core-only: оркестратор не установлен"
+[ "$(CLAUDE_HOME="$H2" run --core-only)" = 0 ] && ok "--core-only: сверка совпадает" || bad "--core-only: сверка"
+[ "$(CLAUDE_HOME="$H2" run)" = 1 ] && ok "без --core-only личные файлы считаются расхождением" || bad "без --core-only расхождения не видно"
+
+# манифест пакета (нужен Python)
+PY=""; for c in python3 python; do command -v "$c" >/dev/null && "$c" -c "import json" >/dev/null 2>&1 && { PY="$c"; break; }; done
+if [ -n "$PY" ]; then
+  "$PY" "$REPO/scripts/manifest.py" check >"$T/manifest.txt" 2>&1 && ok "манифест соответствует файлам" || { bad "манифест не соответствует файлам"; cat "$T/manifest.txt"; }
+else
+  echo "SKIP  манифест: нет Python"
+fi
+
 exit "$fail"

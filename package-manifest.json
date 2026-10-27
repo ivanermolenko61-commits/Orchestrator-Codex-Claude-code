@@ -1,93 +1,106 @@
 {
-  "version": "1.0.0",
-  "source_repository": "ivanermolenko61-commits/ai-knowledge",
-  "source_commit": "68b1d9488d0137223feac7b8ff860a09fe6c3d5f",
-  "accepted_engine_commit": "0862098",
-  "files": {
-    ".gitattributes": {
-      "sha256": "b6eb8f9223303e55b86af7168c34b4f190d89c9e87f4141a3343d0a0b1ce8573",
-      "git_blob": "aa6895e1dd1e914cd3d5eec4f6adc70e89a80533",
-      "unchanged_from_source": true
-    },
-    "scripts/install-global.sh": {
-      "sha256": "a1b078d328f2e29cd997ee56def38a0bf2ab3ec6d48a35be6d5f3a45e7f86fec",
-      "git_blob": "8b7fb53fb20d0fd21121210496bd3cdbf785f3fd",
-      "unchanged_from_source": true
-    },
-    "scripts/test-install-global.sh": {
-      "sha256": "277357c994d6dee9e1d8001a439f61ba020687c495ab7203e1f8bd5ee2cb3481",
-      "git_blob": "2ba75ab8833c7a9549551b0588a5eb9e6ef6d3a7",
-      "unchanged_from_source": true
-    },
-    "skills/agentq/SKILL.md": {
-      "sha256": "63089b0ba11c92d05e5ed1fa2e4322a7528feeecee2867c87f7fc60dec80df2c",
-      "git_blob": "c0e46cf4ffb2614f83dbc6b7c20025cb6045ec4d",
-      "unchanged_from_source": true
-    },
+  "version": "1.1.0",
+  "source_of_truth": "ivanermolenko61-commits/Orchestrator-Codex-Claude-code",
+  "engine_origin": {
+    "repository": "ivanermolenko61-commits/ai-knowledge",
+    "release_commit": "1171344235498ce6aae7a891d5d8867bce2636b1",
+    "accepted_commit": "9aca6cc",
+    "note": "Независимая приёмка PASS на 9aca6cc (Codex gpt-6.1-sol high, вне движка); между 9aca6cc и 1171344 менялся только SKILL.md. С версии 1.1.0 этот репозиторий — единственный источник; ai-knowledge оркестратор не хранит и не устанавливает."
+  },
+  "provenance": {
     "skills/agentq/agentq_global.py": {
-      "sha256": "9c4fd45a5e75f612174dbd077c9542a391224807569a60bedee6bcab651ce542",
-      "git_blob": "72ad2c596ac9c6a44b631f9b44e360ce02bec27e",
+      "source_blob": "bc1043d1920d44b84083aec107aeb4fd432ba899",
       "unchanged_from_source": true
     },
     "skills/agentq/codex-review.sh": {
-      "sha256": "e5cfc1435a4e39d28ae7114be64b8abdbcbec1eac53bcaffdad5cbd9f9fee992",
-      "git_blob": "023eb8005465b4957aa679f8adf9eccc93727232",
+      "source_blob": "cb0ab9fbe888925f8d53cd716d714841454bb898",
       "unchanged_from_source": true
     },
     "skills/agentq/selftest.py": {
-      "sha256": "91efe4ac65556617426fbb840c35434c81fdd7b8bb92677248e25422ee3f9f95",
-      "git_blob": "4d8e41ad36a71595af3b74661512a1246fc9a89e",
+      "source_blob": "e86e37a2d83544658552734dfa87355441de8ff8",
       "unchanged_from_source": true
+    }
+  },
+  "files": {
+    ".agents/agentq.json": {
+      "sha256": "2f14080ff2d7cd98aa544eadc5354080d659419ed5e2669013b2ba7db094a122",
+      "git_blob": "8508d363360c018b56082f51b1944bb3746f0ba7"
     },
-    "global/agents/coder.md": {
-      "sha256": "8a44c6ff262d2e3a11712a8c76912243c4c444809270795af66df4ce16314058",
-      "git_blob": "13574e724372c5e755762198422f049319921f2b",
-      "unchanged_from_source": true
-    },
-    "global/agents/frontend.md": {
-      "sha256": "3066731345fa7707ed6d1664cda4c0ccd4b83dd5835ca701ba10fe7b44421930",
-      "git_blob": "62e037a26766fd073e0a1281584c2995be45b24e",
-      "unchanged_from_source": true
-    },
-    "global/agents/reviewer.md": {
-      "sha256": "bab63eec11a56a24a7c5aa7ccc0fd3963451c4b7f0c63a5f6ea5f3f52ec12a12",
-      "git_blob": "a935f5a49d23a01acc13363e2be2a7080d2709ec",
-      "unchanged_from_source": true
-    },
-    "global/scripts/agentsrules.py": {
-      "sha256": "f0e1215e0c2b58524dce478077751f537c3c3007494267b7e9caa85e9633320d",
-      "git_blob": "50538c90f321a6af0cbc14947840e3fa6406c53a",
-      "unchanged_from_source": true
-    },
-    "global/workflow/project-template.md": {
-      "sha256": "e456a1a485e8607b437bb717b705133c7d8ac8c928184fc7bc099ba8eab51b23",
-      "git_blob": "60d1b412a46d37040649119db4d24ee0f3bf76d9",
-      "unchanged_from_source": false
-    },
-    "global/workflow/executor-rules.md": {
-      "sha256": "e14068958c250d0113c0f0cf02205b2e02bdbdc1a8d72d3a191abb4b7e57698f",
-      "git_blob": "2c53008776df7ebed21c2946c9433cef10670b7f",
-      "unchanged_from_source": true
-    },
-    "global/CLAUDE.md": {
-      "sha256": "9ca2ac8283ec1982a19ea957d474a49e794f55bed954214017ee63863a271d65",
-      "git_blob": "11b7f5f6bf2a6b7d63eeaba26980bc54250569c4",
-      "unchanged_from_source": false
-    },
-    "README.md": {
-      "sha256": "536fd69c6d8bb376efbc59bca744a0bf8a598b7434baadf0f9f12e164b5c7af2",
-      "git_blob": "1a98c0d48a4125527451106a1abfc0931e36ace2",
-      "unchanged_from_source": false
-    },
-    "VERSION": {
-      "sha256": "59854984853104df5c353e2f681a15fc7924742f9a2e468c29af248dce45ce03",
-      "git_blob": "3eefcb9dd5b38e2c1dc061052455dd97bcd51e6c",
-      "unchanged_from_source": false
+    ".gitattributes": {
+      "sha256": "b6eb8f9223303e55b86af7168c34b4f190d89c9e87f4141a3343d0a0b1ce8573",
+      "git_blob": "aa6895e1dd1e914cd3d5eec4f6adc70e89a80533"
     },
     ".gitignore": {
       "sha256": "72bd7da7f80f9d007b15b525f9b014bfaf78c03910c88379051ac532dec53d63",
-      "git_blob": "88f50b4b701478fb5da86b754af40853397689dd",
-      "unchanged_from_source": false
+      "git_blob": "88f50b4b701478fb5da86b754af40853397689dd"
+    },
+    "AGENTS.md": {
+      "sha256": "3908c3b70c63b4a801be9b6781610cd6844ab8d6774a9b375168214f2a97dd7a",
+      "git_blob": "67def618aa2ae45db21e8ec4a9904b3abea43fac"
+    },
+    "global/agents/coder.md": {
+      "sha256": "8a44c6ff262d2e3a11712a8c76912243c4c444809270795af66df4ce16314058",
+      "git_blob": "13574e724372c5e755762198422f049319921f2b"
+    },
+    "global/agents/frontend.md": {
+      "sha256": "3066731345fa7707ed6d1664cda4c0ccd4b83dd5835ca701ba10fe7b44421930",
+      "git_blob": "62e037a26766fd073e0a1281584c2995be45b24e"
+    },
+    "global/agents/reviewer.md": {
+      "sha256": "bab63eec11a56a24a7c5aa7ccc0fd3963451c4b7f0c63a5f6ea5f3f52ec12a12",
+      "git_blob": "a935f5a49d23a01acc13363e2be2a7080d2709ec"
+    },
+    "global/CLAUDE.md": {
+      "sha256": "9ca2ac8283ec1982a19ea957d474a49e794f55bed954214017ee63863a271d65",
+      "git_blob": "11b7f5f6bf2a6b7d63eeaba26980bc54250569c4"
+    },
+    "global/scripts/agentsrules.py": {
+      "sha256": "f0e1215e0c2b58524dce478077751f537c3c3007494267b7e9caa85e9633320d",
+      "git_blob": "50538c90f321a6af0cbc14947840e3fa6406c53a"
+    },
+    "global/workflow/executor-rules.md": {
+      "sha256": "e14068958c250d0113c0f0cf02205b2e02bdbdc1a8d72d3a191abb4b7e57698f",
+      "git_blob": "2c53008776df7ebed21c2946c9433cef10670b7f"
+    },
+    "global/workflow/project-template.md": {
+      "sha256": "e456a1a485e8607b437bb717b705133c7d8ac8c928184fc7bc099ba8eab51b23",
+      "git_blob": "60d1b412a46d37040649119db4d24ee0f3bf76d9"
+    },
+    "README.md": {
+      "sha256": "4c87f2b503ea6eaba5c4f474c4486836c473c9606639b34f788d83adcf4d55ca",
+      "git_blob": "944c7af9588664b1eba94c3098145db19270a1cf"
+    },
+    "scripts/install-global.sh": {
+      "sha256": "fbd970720f43f33ca9369ca552447c71f9a04d6056a50299d2cf6aa66cee7bff",
+      "git_blob": "cf5f7f9631951adf2c2aaeebca1d3bb618a2461b"
+    },
+    "scripts/manifest.py": {
+      "sha256": "5c8d5ee365367ac5ea148281d631befaac7136a6826b64839c38dd3fe132655a",
+      "git_blob": "044330aa5eb2fd6569e19ddd360897d941d28eaf"
+    },
+    "scripts/test-install-global.sh": {
+      "sha256": "4a2d6cab85d7cc938e33d26e9e42535d354e525478be39f0581c871d9858d9cc",
+      "git_blob": "1c083c7451f6d5d85cfab9f864cdde1d02960573"
+    },
+    "skills/agentq/agentq_global.py": {
+      "sha256": "58a9bc78b95deb5f682df8d811379952534b337bc9b5a5bea967888205e60d61",
+      "git_blob": "bc1043d1920d44b84083aec107aeb4fd432ba899"
+    },
+    "skills/agentq/codex-review.sh": {
+      "sha256": "c78dc298bb0520f6c4c76b60133b3628d715e1db9947ed4ccb2a245a49ae4a3e",
+      "git_blob": "cb0ab9fbe888925f8d53cd716d714841454bb898"
+    },
+    "skills/agentq/selftest.py": {
+      "sha256": "b6fec681c5b3dbaa8fd1a58520ac802ae1b95153c2ff23df7b20b8387eb21c57",
+      "git_blob": "e86e37a2d83544658552734dfa87355441de8ff8"
+    },
+    "skills/agentq/SKILL.md": {
+      "sha256": "69e81f8e7c167804cdf4bfc0e578f1cd3d92e307f52ce530218ad362544a0417",
+      "git_blob": "f408c2e6c41453897a2e9a8050af4a9f7976c5d0"
+    },
+    "VERSION": {
+      "sha256": "1575e1af4a95f12f70b4ee6a6adce8160953d93ea17dc2611b90883ccc3ad3b8",
+      "git_blob": "9084fa2f716a7117829f3f32a5f4cef400e02903"
     }
   }
 }
