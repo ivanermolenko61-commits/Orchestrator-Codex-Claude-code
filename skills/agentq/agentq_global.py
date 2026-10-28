@@ -1045,13 +1045,16 @@ def cmd_start(a):
     # Устойчивую идентичность работы движок вывести не может (формулировка и коммиты меняются), поэтому после непринятой задачи
     # новая начинается только с явным решением: продолжение (расход переносится) или новая работа (причина, решение Ивана).
     open_e = [e for e in entries if e['result'] != 'PASS' and not e.get('resolved')]
+    # Незавершённую работу можно продолжить, пока у неё нет продолжателя: в том числе после --new-work, которым Иван запустил другую задачу
+    # плана. Иначе возвращение к ней начиналось бы с нуля, а расход каждой задачи плана принадлежит только её цепочке.
+    resumable = [e for e in entries if e['result'] != 'PASS' and not e.get('continued_by')]
     chain, inh = tid, {'author': 0, 'review': 0, 'calls': 0, 'units': {}, 'verdicts': {}, 'meta': {}}
     hard = [a.max_calls] if a.max_calls is not None else []
     need(not hard or a.max_calls >= 1, '--max-calls ≥ 1')
-    if open_e:
+    if open_e or a.continues:
         if a.continues:
-            prev = next((e for e in open_e if e['id'] == a.continues), None)
-            need(prev, f'--continues: нет непринятой задачи {a.continues} (есть: {", ".join(e["id"] for e in open_e)})')
+            prev = next((e for e in resumable if e['id'] == a.continues), None)
+            need(prev, f'--continues: нет непринятой задачи {a.continues} (есть: {", ".join(e["id"] for e in resumable) or "нет"})')
             chain = prev.get('chain', prev['id'])
             for e in entries:   # совокупный расход всей цепочки работы, независимо от отметок resolved
                 if e.get('chain', e['id']) == chain:
@@ -1082,8 +1085,6 @@ def cmd_start(a):
                  '--new-work "<причина ≥20 символов>"')
             for e in open_e:
                 e['resolved'], e['new_work_reason'] = True, a.new_work.strip()
-    elif a.continues:
-        need(False, '--continues: непринятых задач нет')
     gnorm = nsha
     contract = ''
     if a.contract_file:

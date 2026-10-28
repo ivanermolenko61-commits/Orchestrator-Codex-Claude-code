@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
+  "version": "1.1.1",
   "source_of_truth": "ivanermolenko61-commits/Orchestrator-Codex-Claude-code",
   "engine_origin": {
     "repository": "ivanermolenko61-commits/ai-knowledge",
@@ -10,7 +10,8 @@
   "provenance": {
     "skills/agentq/agentq_global.py": {
       "source_blob": "bc1043d1920d44b84083aec107aeb4fd432ba899",
-      "unchanged_from_source": true
+      "unchanged_from_source": false,
+      "changed_in": "1.1.1: бюджет по конкретной задаче плана (возврат к незавершённой после --new-work); требует собственной независимой приёмки"
     },
     "skills/agentq/codex-review.sh": {
       "source_blob": "cb0ab9fbe888925f8d53cd716d714841454bb898",
@@ -18,7 +19,8 @@
     },
     "skills/agentq/selftest.py": {
       "source_blob": "e86e37a2d83544658552734dfa87355441de8ff8",
-      "unchanged_from_source": true
+      "unchanged_from_source": false,
+      "changed_in": "1.1.1: бюджет по конкретной задаче плана (возврат к незавершённой после --new-work); требует собственной независимой приёмки"
     }
   },
   "files": {
@@ -51,8 +53,8 @@
       "git_blob": "a935f5a49d23a01acc13363e2be2a7080d2709ec"
     },
     "global/CLAUDE.md": {
-      "sha256": "9ca2ac8283ec1982a19ea957d474a49e794f55bed954214017ee63863a271d65",
-      "git_blob": "11b7f5f6bf2a6b7d63eeaba26980bc54250569c4"
+      "sha256": "aa8eeba78df136c17f18f8903ab95a80814987f070bd52f054db8b181dc0abbb",
+      "git_blob": "ad755afca9f6cb350ab70d55f6ecc30813af21e6"
     },
     "global/scripts/agentsrules.py": {
       "sha256": "f0e1215e0c2b58524dce478077751f537c3c3007494267b7e9caa85e9633320d",
@@ -67,8 +69,8 @@
       "git_blob": "60d1b412a46d37040649119db4d24ee0f3bf76d9"
     },
     "README.md": {
-      "sha256": "4c87f2b503ea6eaba5c4f474c4486836c473c9606639b34f788d83adcf4d55ca",
-      "git_blob": "944c7af9588664b1eba94c3098145db19270a1cf"
+      "sha256": "e49e02c919dcb77b1201aad233e81a0d2de1f2c377293d8841c5d75780e2e570",
+      "git_blob": "11a67d1c87e0a356e1dd79ede086b7e027721de4"
     },
     "scripts/install-global.sh": {
       "sha256": "b66806667f561d4ceda10d6fe017bf767bc217c2da46c62d4a6978473046cb6b",
@@ -83,24 +85,24 @@
       "git_blob": "f5683b1af358ca61e9600f4b4547af176ca18d38"
     },
     "skills/agentq/agentq_global.py": {
-      "sha256": "58a9bc78b95deb5f682df8d811379952534b337bc9b5a5bea967888205e60d61",
-      "git_blob": "bc1043d1920d44b84083aec107aeb4fd432ba899"
+      "sha256": "30c215c45aa4d53aed72b4dfd26d1945c1987f6f94799ecd7cc9f2aae2c00ba6",
+      "git_blob": "428a3fb446dd7321363c5e9be785d0f42b85a0e3"
     },
     "skills/agentq/codex-review.sh": {
       "sha256": "c78dc298bb0520f6c4c76b60133b3628d715e1db9947ed4ccb2a245a49ae4a3e",
       "git_blob": "cb0ab9fbe888925f8d53cd716d714841454bb898"
     },
     "skills/agentq/selftest.py": {
-      "sha256": "b6fec681c5b3dbaa8fd1a58520ac802ae1b95153c2ff23df7b20b8387eb21c57",
-      "git_blob": "e86e37a2d83544658552734dfa87355441de8ff8"
+      "sha256": "75a378242b87a6ac01a649ed873e306e77d4e2ee04f86893d76df3ce36479e45",
+      "git_blob": "b0918e9c5a87c97105b7ea81a9620a9a3fa2ac74"
     },
     "skills/agentq/SKILL.md": {
-      "sha256": "69e81f8e7c167804cdf4bfc0e578f1cd3d92e307f52ce530218ad362544a0417",
-      "git_blob": "f408c2e6c41453897a2e9a8050af4a9f7976c5d0"
+      "sha256": "66e14ab831073cbc35458a578510718a41dd43fa9df38d76e2abbceb897118bc",
+      "git_blob": "60bcde943fdc2aa26337c4d540e9b5caaf2bc030"
     },
     "VERSION": {
-      "sha256": "1575e1af4a95f12f70b4ee6a6adce8160953d93ea17dc2611b90883ccc3ad3b8",
-      "git_blob": "9084fa2f716a7117829f3f32a5f4cef400e02903"
+      "sha256": "cc52f678848b814373757b460383bf61960e4943c203735adde0a350b3e50989",
+      "git_blob": "524cb55242b53f6a64cc646ea05db6acc7696d2d"
     }
   }
 }

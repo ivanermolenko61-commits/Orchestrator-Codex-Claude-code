@@ -537,6 +537,56 @@ def t_budget_units_chain():
     check('общий расход цепочки считается вместе с перенесённым', st['inherited']['calls'] == 6 and len(st['calls']) == 2, st['inherited'])
 
 
+def t_task_budget_scope():
+    """Бюджет принадлежит конкретной задаче плана: после принятой задачи следующая начинает с нуля, незавершённая сохраняет расход
+    при новом запуске даже после другой самостоятельной задачи; предел Ивана действует только на ту цепочку, для которой задан."""
+    pas = {'text': 'VERDICT: PASS'}
+    p = Proj('scope')
+    p.script('codex', [FIX_T, FIX_T, pas] + [FIX_T] * 3 + [pas])
+    p.cr('start', 'задача плана один', '--id', 'plan-1', '--max-calls', '4')
+    rcs = [review_n(p, n)[0] for n in range(3)]
+    rc_fin, out, _ = p.cr('finish')
+    check('две задачи плана: первая принята (3 ревью, предел Ивана 4 заданный для неё)', rcs == [1, 1, 0] and rc_fin == 0 and 'ACCEPTANCE: VERIFIED' in out, (rcs, rc_fin))
+    rc, _, err = p.cr('start', 'задача плана два', '--id', 'plan-2')
+    st = rstate(p)
+    check('две задачи плана: вторая начинается с нуля — расход, единицы и предел первой не переносятся',
+          rc == 0 and st['inherited']['calls'] == 0 and not st['inherited']['units'] and st['budget']['hard'] is None and st['chain'] == 'plan-2', (st.get('inherited'), err))
+    rcs2 = [review_n(p, 10 + n)[0] for n in range(3)]
+    check('две задачи плана: вторая получает полный набор своих ревью независимо от расхода первой', rcs2 == [1, 1, 1] and p.count('codex-review') == 6, rcs2)
+    p.cr('finish', '--abandon')
+    led = {e['id']: e for e in rledger(p)}
+    check('история первой задачи сохранена в журнале (расход, результат, предел)',
+          led['plan-1']['result'] == 'PASS' and led['plan-1']['calls'] == 3 and led['plan-1']['max_calls'] == 4 and led['plan-2']['calls'] == 3, led)
+
+    q = Proj('scope-resume')
+    q.script('codex', [FIX_T] * 3 + [pas, pas] + [FIX_T] * 3)
+    q.cr('start', 'незавершённая задача', '--id', 'bot-1')
+    for n in range(3):
+        review_n(q, n)
+    q.cr('finish', '--abandon')
+    rc, _, err = q.cr('start', 'другая задача плана', '--id', 'plan-b')
+    check('незавершённая задача: другая задача плана без решения владельца не стартует', rc == 2 and 'Бюджеты не сбрасываются' in err, err)
+    rc, _, err = q.cr('start', 'другая задача плана', '--id', 'plan-b', '--new-work', 'самостоятельная задача плана, незавершённая остаётся открытой')
+    check('незавершённая задача: самостоятельная задача стартует по решению владельца и с нуля',
+          rc == 0 and rstate(q)['inherited']['calls'] == 0, err)
+    review_n(q, 20)
+    rc_fin, _, _ = q.cr('finish')
+    check('незавершённая задача: самостоятельная задача принята', rc_fin == 0 and rledger(q)[-1]['result'] == 'PASS')
+    n0 = q.count('codex-review')
+    rc, _, err = q.cr('start', 'незавершённая задача снова', '--id', 'plan-b2', '--continues', 'plan-b')
+    check('принятую задачу продолжить нельзя', rc == 2 and 'нет непринятой задачи' in err, err)
+    rc, _, err = q.cr('start', 'незавершённая задача снова', '--id', 'bot-2', '--continues', 'bot-1')
+    st = rstate(q) if rc == 0 else {}
+    check('незавершённая задача: возврат после другой задачи сохраняет её расход (3 вызова, единица main 3 ревью), расход другой задачи не примешан',
+          rc == 0 and st['inherited']['calls'] == 3 and st['inherited']['units']['main']['review'] == 3 and st['chain'] == 'bot-1', (st.get('inherited'), err))
+    rc, _, err = q.cr('review')
+    check('незавершённая задача: после возврата контрольная точка 3/3 без подтверждённого прогресса действует, нового вызова нет',
+          rc == 3 and q.count('codex-review') == n0, err)
+    led = {e['id']: e for e in rledger(q)}
+    check('незавершённая задача: связь продолжения записана, повторное продолжение той же записи отказано',
+          led['bot-1']['continued_by'] == 'bot-2' and q.cr('start', 'ещё', '--id', 'bot-3', '--continues', 'bot-1')[0] == 2, led['bot-1'])
+
+
 def t_unavailable_and_modes():
     p = Proj('nocodex')
     p.cr('start', 'нет codex', '--id', 'noc-1', '--kind', 'mixed', '--contract-file', p.contract())
@@ -1658,7 +1708,7 @@ def t_links():
 def main():
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding='utf-8', errors='replace')
-    for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links,
+    for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_task_budget_scope, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links,
               t_unavailable_and_modes):
         try:
             t()
