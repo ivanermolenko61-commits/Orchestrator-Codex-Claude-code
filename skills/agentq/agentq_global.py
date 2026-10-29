@@ -10,19 +10,24 @@
   route                         какой маршрут действует и чего не хватает (без вызовов моделей)
   start "<цель>" [--id ID] [--kind backend|frontend|mixed] [--contract-file F] [--plan-approved]
   unit <uid> --kind backend|frontend|protected --files F... [--context F...] [--after U...]
-  author <uid> [low|medium|high]   один вызов Codex-автора (frontend-единица)
-  cycle <uid> [low|medium|high]    frontend: автор -> проверки -> ревью -> исправления до PASS/лимита
+  author <uid> [low|medium|high] [--wait СЕК]   один вызов Codex-автора (frontend-единица); --wait: ждать готовности --after без расхода
+  cycle <uid> [low|medium|high] [--wait СЕК]    frontend: автор -> проверки -> ревью -> исправления до PASS/лимита
   review [uid] [low|medium|high] [--full]   независимое ревью другим сервисом
-  integrate <uid>               ff-only кандидата frontend-единицы в ветку задачи после PASS и успешных проверок
+  integrate <uid>               кандидат frontend-единицы в ветку задачи после PASS и успешных проверок: ff-only, а если ветка ушла вперёд
+                                без файлов единицы — слияние без конфликтов, проверки на итоговом SHA до перемещения ветки
   checks [uid]                  механические проверки точного SHA в контейнере (без вызова модели)
   waive <uid> "<причина>"       обоснование неприменимости проверок (только если их нет в конфигурации базы)
   status | finish [--abandon]
 
-Коды выхода: 0 PASS/ok, 1 FIX, 2 ERROR/blocked, 3 LIMIT, 4 BUSY,
+Параллельная работа: разные единицы выполняются одновременно в отдельных процессах (блокировка на единицу, status без блокировок);
+общее состояние задачи сливается по единицам под короткой блокировкой, резерв бюджета атомарен.
+
+Коды выхода: 0 PASS/ok, 1 FIX, 2 ERROR/blocked, 3 LIMIT, 4 BUSY, 5 WAIT (зависимость --after ещё не готова, вызовов не было),
 для route: 0 глобальный маршрут готов, 10 проектный координатор, 11 не хватает настроек, 12 координатор без перекрёстных маршрутов.
 """
 import argparse
 import contextlib
+import copy
 import fnmatch
 import hashlib
 import io
@@ -111,26 +116,40 @@ def rjson(p):
     return json.loads(Path(p).read_text(encoding='utf-8'))
 
 
+def replace_retry(tmp, dst):
+    """os.replace с повтором: на Windows замена файла, который в этот момент читает другой процесс (status, ожидание зависимостей), даёт PermissionError."""
+    for i in range(60):
+        try:
+            os.replace(tmp, dst)
+            return
+        except PermissionError:
+            if i == 59:
+                raise
+            time.sleep(0.05)
+
+
+def rjson_retry(p):
+    for _ in range(60):
+        try:
+            return rjson(p)
+        except PermissionError:   # файл в момент замены другим процессом
+            time.sleep(0.05)
+    return rjson(p)
+
+
 def wjson(p, value):
-    p = Path(p)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + '.tmp')
-    with tmp.open('w', encoding='utf-8', newline='\n') as f:
-        f.write(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, p)
+    wtext(p, json.dumps(value, ensure_ascii=False, indent=2) + '\n')
 
 
 def wtext(p, text):
     p = Path(p)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + '.tmp')
+    tmp = p.with_name(f'{p.name}.{os.getpid()}.tmp')   # свой временный файл у каждого процесса
     with tmp.open('w', encoding='utf-8', newline='\n') as f:
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, p)
+    replace_retry(tmp, p)
 
 
 def timeout_for(kind):
@@ -148,7 +167,8 @@ def clean_env():
                'PROGRAMFILES', 'PROGRAMFILES(X86)', 'COMSPEC', 'HOMEDRIVE', 'HOMEPATH', 'HOME', 'LANG', 'CODEX_HOME',
                'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY', 'NODE_USE_ENV_PROXY'}
     env = {k: v for k, v in os.environ.items() if k.upper() in allowed}
-    env.update(PYTHONIOENCODING='utf-8', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1')
+    env.update(PYTHONIOENCODING='utf-8', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1',
+               GIT_OPTIONAL_LOCKS='0')   # параллельные процессы не конкурируют за index.lock при чтении
     return env
 
 
@@ -373,9 +393,13 @@ def cmd_route(a):
 # ---------------------------------------------------------------- состояние
 
 class Lock:
-    """OS-блокировка репозитория: снимается ОС при смерти процесса."""
-    def __init__(self, root):
-        self.path = Path(root) / '.ai/task.lock'
+    """OS-блокировка: снимается ОС при смерти процесса. Имена: 'task' — структура задачи (start/unit/finish), 'unit-<uid>' — единица
+    (одна команда на единицу, разные единицы работают параллельно), 'integrate' — последовательная интеграция, 'state' — короткая
+    транзакция над state.json. wait > 0 — ждать освобождения столько секунд, иначе сразу BUSY."""
+    def __init__(self, root, name='task', wait=0):
+        base = Path(root) / '.ai'
+        self.path = base / 'task.lock' if name == 'task' else base / 'locks' / f'{name}.lock'
+        self.name, self.wait = name, wait
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -383,17 +407,23 @@ class Lock:
         if self.path.stat().st_size == 0:
             self.f.write(b'0')
             self.f.flush()
-        self.f.seek(0)
-        try:
-            if os.name == 'nt':
-                import msvcrt
-                msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self.f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            self.f.close()
-            raise Blocked('BUSY: другой процесс agentq работает в этом репозитории', 4) from None
+        deadline = time.time() + self.wait
+        while True:
+            self.f.seek(0)
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    self.f.close()
+                    what = 'в этом репозитории' if self.name == 'task' else f'({self.name})'
+                    raise Blocked(f'BUSY: другой процесс agentq уже работает {what}', 4) from None
+                time.sleep(0.05)
         return self
 
     def __exit__(self, *exc):
@@ -414,29 +444,110 @@ def ensure_ai_ignored(root):
         ex.write_text(text + ('' if text.endswith('\n') or not text else '\n') + '/.ai/\n', encoding='utf-8')
 
 
+_STATE_LOCKS = {}
+
+
+@contextlib.contextmanager
+def state_lock(root):
+    """Короткая блокировка транзакции над state.json (повторно входимая в пределах процесса)."""
+    key = str(Path(root))
+    ent = _STATE_LOCKS.get(key)
+    if ent:
+        ent[1] += 1
+        try:
+            yield
+        finally:
+            ent[1] -= 1
+        return
+    lk = Lock(root, 'state', wait=60).__enter__()
+    _STATE_LOCKS[key] = [lk, 1]
+    try:
+        yield
+    finally:
+        del _STATE_LOCKS[key]
+        lk.__exit__()
+
+
+MISSING = object()
+
+
+def normalize_state(s):
+    for uid, u in s['units'].items():   # состояние, записанное более ранней версией движка
+        for k, v in (('carried_report', None), ('review_base', None), ('carried_exclude', []), ('stall', 0), ('progress', None),
+                     ('rounds', []), ('rethinks', []), ('open_checks', False), ('merged', None)):
+            u.setdefault(k, v)
+        u.setdefault('open_review', (u.get('verdict') or {}).get('value') not in (None, 'PASS'))
+        u.setdefault('review_applied', (u.get('verdict') or {}).get('n', 0))
+        u.setdefault('author_applied', max([c['n'] for c in s['calls'].values()
+                                            if c['unit'] == uid and c['role'] == 'author'] or [0]) if u.get('candidate') else 0)
+
+
+def merge_state(orig, mine, disk):
+    """Трёхстороннее слияние состояния на уровне единиц и вызовов: orig — что процесс прочитал, mine — его правки, disk — что на диске
+    сейчас. Свои изменённые записи побеждают, чужие переносятся в mine НА МЕСТЕ (ссылки на свои единицы не устаревают). Запись,
+    изменённая обоими, — отказ (единицу ведёт один процесс), состояние не затирается. Возвращает состояние для записи."""
+    out = copy.deepcopy(disk)
+    for k, v in mine.items():
+        if k in ('units', 'calls'):
+            for name, val in v.items():
+                was, now = orig[k].get(name, MISSING), disk[k].get(name, MISSING)
+                if val == was:
+                    continue
+                need(now == was or now == val, f'{k}.{name}: запись изменил другой процесс — слияние отказано, состояние не затёрто')
+                out[k][name] = copy.deepcopy(val)
+        elif v != orig.get(k, MISSING):
+            need(disk.get(k, MISSING) in (orig.get(k, MISSING), v), f'{k}: изменено другим процессом — слияние отказано')
+            out[k] = copy.deepcopy(v)
+    for k in ('units', 'calls'):
+        for name, val in out[k].items():
+            if name not in mine[k] or (mine[k][name] == orig[k].get(name, MISSING) and mine[k][name] != val):
+                mine[k][name] = copy.deepcopy(val)
+    return out
+
+
 class Task:
     def __init__(self, root):
         self.root = Path(root)
         self.dir = self.root / '.ai/task'
         self.path = self.dir / 'state.json'
         self.s = None
+        self.orig = None   # последнее известное состояние диска: основа трёхстороннего слияния
+
+    def read_disk(self):
+        s = rjson_retry(self.path)
+        check_state(s)
+        normalize_state(s)
+        return s
 
     def load(self):
         need(self.path.is_file(), 'нет активной задачи — сначала: start "<цель>"')
-        self.s = rjson(self.path)
-        check_state(self.s)
-        for uid, u in self.s['units'].items():   # состояние, записанное более ранней версией движка
-            for k, v in (('carried_report', None), ('review_base', None), ('carried_exclude', []), ('stall', 0), ('progress', None),
-                         ('rounds', []), ('rethinks', []), ('open_checks', False)):
-                u.setdefault(k, v)
-            u.setdefault('open_review', (u.get('verdict') or {}).get('value') not in (None, 'PASS'))
-            u.setdefault('review_applied', (u.get('verdict') or {}).get('n', 0))
-            u.setdefault('author_applied', max([c['n'] for c in self.s['calls'].values()
-                                                if c['unit'] == uid and c['role'] == 'author'] or [0]) if u.get('candidate') else 0)
+        self.s = self.read_disk()
+        self.orig = copy.deepcopy(self.s)
         return self
 
+    def sync(self):
+        """Подтянуть чужие изменения (вызовы и единицы других процессов), не теряя своих несохранённых правок."""
+        disk = self.read_disk()
+        merge_state(self.orig, self.s, disk)
+        self.orig = disk
+
     def save(self):
-        wjson(self.path, self.s)
+        with state_lock(self.root):
+            if self.orig is None or not self.path.is_file():
+                wjson(self.path, self.s)
+                self.orig = copy.deepcopy(self.s)
+                return
+            out = merge_state(self.orig, self.s, self.read_disk())
+            wjson(self.path, out)
+            self.orig = out
+
+    @contextlib.contextmanager
+    def txn(self):
+        """Чтение свежего состояния, проверка и запись под одной блокировкой: резерв бюджета и проверка владения файлами атомарны."""
+        with state_lock(self.root):
+            self.sync()
+            yield self
+            self.save()
 
     def spent(self, uid, role):
         """Расход роли по единице: в этой задаче + перенесённый по --continues (тот же uid: переименование при продолжении отказано, см.
@@ -689,21 +800,6 @@ def pid_alive(pid):
         return False
 
 
-def orphan_codex():
-    if os.environ.get('AQ_NO_ORPHAN_SCAN') == '1':
-        return ''
-    try:
-        if os.name == 'nt':
-            r = run(['powershell.exe', '-NoProfile', '-Command',
-                     "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'codex*' -and $_.CommandLine -match '\\sexec(\\s|$)' } | ForEach-Object { $_.ProcessId }"],
-                    timeout=40)
-            return ' '.join(r.stdout.split())
-        r = run(['pgrep', '-f', r'^[^ ]*codex[^ /]* exec( |$)'], timeout=20)
-        return ' '.join(r.stdout.split())
-    except (OSError, subprocess.SubprocessError):
-        return ''
-
-
 def model_call(task, uid, role, n, kind, prompt, launcher, parser):
     """Единственный путь к модели. Резерв бюджета сохраняется ДО запуска и не возвращается.
     receipt привязан к точному тексту запроса; готовый ответ после сбоя читается без нового вызова."""
@@ -718,7 +814,7 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser):
     raw = d / 'raw.txt'
     if key in task.s['calls']:
         saved = d / 'prompt.txt'
-        need(saved.exists() and saved.read_text(encoding='utf-8') == prompt,
+        need(saved.exists() and saved.read_bytes().decode('utf-8') == prompt,   # байты как записаны: CRLF файлов (autocrlf) не должен давать «другой запрос»
              f'{key}: прерванный/неопределённый вызов с другим запросом — повтор запрещён, см. {d}')
         pj = d / 'process.json'
         if pj.exists() and not raw.exists():
@@ -727,16 +823,16 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser):
         result = parser(raw.read_text(encoding='utf-8'))
         wjson(rec, {'binding': binding, 'result': result})
         return result
-    ledger(task.root)   # повреждение журнала после start обнаруживается до платного вызова, а не на finish
-    gate(task, uid, role)
-    need(len(prompt.encode('utf-8')) <= MAX_PROMPT, f'запрос {len(prompt.encode())} байт > {MAX_PROMPT}: раздели задачу')
-    need(not SECRET_RE.search(prompt), 'в запросе найдено похожее на секрет — в модель не отправлено')
-    if kind.startswith('codex'):
-        orphans = orphan_codex()
-        need(not orphans.strip(), f'BUSY: работает codex exec (pid: {orphans}); сам процессы не завершай', 4)
-    task.s['calls'][key] = {'unit': uid, 'role': role, 'kind': kind, 'n': n, 'prompt_sha256': sha(prompt),
-                            'prompt_bytes': len(prompt.encode()), 'at': time.time()}
-    task.save()
+    # Параллельные единицы делят общий бюджет: свежее состояние, проверка предела и резерв — одна транзакция под блокировкой, иначе два
+    # процесса одновременно заняли бы последнее место. Осиротевший вызов этой единицы ловится выше по pid из process.json; чужие
+    # процессы codex (другие единицы, сторонние сессии) вызов не блокируют.
+    with task.txn():
+        ledger(task.root)   # повреждение журнала после start обнаруживается до платного вызова, а не на finish
+        gate(task, uid, role)
+        need(len(prompt.encode('utf-8')) <= MAX_PROMPT, f'запрос {len(prompt.encode())} байт > {MAX_PROMPT}: раздели задачу')
+        need(not SECRET_RE.search(prompt), 'в запросе найдено похожее на секрет — в модель не отправлено')
+        task.s['calls'][key] = {'unit': uid, 'role': role, 'kind': kind, 'n': n, 'prompt_sha256': sha(prompt),
+                                'prompt_bytes': len(prompt.encode()), 'at': time.time()}
     d.mkdir(parents=True, exist_ok=True)
     wtext(d / 'prompt.txt', prompt)
     launcher(d, prompt)
@@ -1018,7 +1114,7 @@ def new_unit(kind, files, context, after, base, spec):
             'files': files, 'context': context, 'after': after, 'spec': spec, 'status': 'open', 'base': base, 'worktree': None,
             'branch': None, 'pins': {}, 'candidate': None, 'author_applied': 0, 'review_applied': 0, 'unmet': [], 'checks': None, 'verdict': None,
             'reviewed': None, 'last_report': None, 'carried_report': None, 'review_base': None, 'carried_exclude': [], 'stall': 0,
-            'progress': None, 'rounds': [], 'rethinks': [], 'open_checks': False, 'open_review': False}
+            'progress': None, 'rounds': [], 'rethinks': [], 'open_checks': False, 'open_review': False, 'merged': None}
 
 
 def cmd_start(a):
@@ -1133,20 +1229,21 @@ def cmd_unit(a):
         need(not is_protected(mod, rules, f), f'{f}: защищённая зона/конфиг не передаётся автору даже как контекст')
     for f in files + context:
         nolink(root, f, 'файл')
-    for k, v in t.s['units'].items():
-        clash = {canon(f) for f in files} & {canon(f) for f in v['files']}
-        need(not clash, f'файлы уже принадлежат единице {k}: {sorted(clash)} (исключительное владение, регистр не важен)')
     need(len({canon(f) for f in files}) == len(files), 'в списке файлов есть повторы или алиасы по регистру')
-    for k in a.after:
-        need(k in t.s['units'], f'--after: нет единицы {k}')
     spec = Path(a.spec_file).read_text(encoding='utf-8') if a.spec_file else ''
     need(len(spec) <= 4000, 'спецификация ≤ 4000 символов')
     need(not SECRET_RE.search(spec), 'в спецификации найдено похожее на секрет')
-    base = git(root, 'rev-parse', 'HEAD') if a.kind != 'frontend' else None
-    u = new_unit(a.kind, files, context, a.after, base, spec)
-    carry_unit(t, a.uid, u)   # до записи: неоднозначная единица продолжения не создаётся
-    t.s['units'][a.uid] = u
-    t.save()
+    with t.txn():   # проверка владения и запись единицы — одна транзакция: две одновременные единицы не получат один файл
+        need(a.uid not in t.s['units'], f'единица {a.uid} уже есть')
+        for k, v in t.s['units'].items():
+            clash = {canon(f) for f in files} & {canon(f) for f in v['files']}
+            need(not clash, f'файлы уже принадлежат единице {k}: {sorted(clash)} (исключительное владение, регистр не важен)')
+        for k in a.after:
+            need(k in t.s['units'], f'--after: нет единицы {k}')
+        base = git(root, 'rev-parse', 'HEAD') if a.kind != 'frontend' else None
+        u = new_unit(a.kind, files, context, a.after, base, spec)
+        carry_unit(t, a.uid, u)   # до записи: неоднозначная единица продолжения не создаётся
+        t.s['units'][a.uid] = u
     say(f'Единица {a.uid}: {a.kind}, автор {u["author"]}, reviewer {u["reviewer"]}, файлов {len(files)}.')
     return 0
 
@@ -1372,7 +1469,7 @@ def waiver_valid(task, uid):
 def verification(task, uid):
     """Чем подтверждена единица: 'checks' (успешные проверки на точном SHA), 'waived' (зафиксированное обоснование) или None."""
     u = task.unit(uid)
-    tip = u['candidate'] if u['kind'] == 'frontend' else u['reviewed']
+    tip = (u['merged'] or u['candidate']) if u['kind'] == 'frontend' else u['reviewed']   # влитая слиянием единица подтверждается на итоговом SHA
     c = u['checks']
     if c and c.get('configured') and c.get('ok') is True and c['sha'] == tip:
         return 'checks'
@@ -1409,14 +1506,35 @@ def pending_n(task, uid, role, applied=None):
     return k + 1
 
 
+def unmet_deps(task, uid):
+    """Зависимости --after, которые ещё не готовы. Зависимая единица строится на HEAD: backend/protected — после PASS (его коммиты уже в ветке),
+    frontend — только после integrate, иначе её код в HEAD не попал бы."""
+    out = []
+    for dep in task.unit(uid)['after']:
+        d = task.unit(dep)
+        if d['kind'] == 'frontend':
+            if d['status'] != 'integrated':
+                out.append(f'сначала должна быть влита (integrate) единица {dep} (--after)')
+        elif d['status'] not in ('accepted', 'integrated'):
+            out.append(f'сначала должна быть принята единица {dep} (--after)')
+    return out
+
+
+def wait_deps(task, uid, wait):
+    """Ожидание готовности зависимостей без вызовов моделей и расхода. Не дождались — claim остановит с кодом 5 (WAIT)."""
+    deadline = time.time() + (wait or 0)
+    while unmet_deps(task, uid) and time.time() < deadline:
+        time.sleep(float(os.environ.get('AQ_POLL', '2')))
+        task.sync()
+
+
 def claim(task, uid):
     root, u = task.root, task.unit(uid)
     need(git(root, 'branch', '--show-current') == task.s['branch'], 'ветка задачи изменилась')
     head = git(root, 'rev-parse', 'HEAD')
     need(git(root, 'merge-base', '--is-ancestor', task.s['base'], head, check=False).returncode == 0, 'база задачи не предок HEAD')
-    for dep in u['after']:
-        need(task.unit(dep)['status'] == 'accepted' or task.unit(dep)['status'] == 'integrated',
-             f'сначала должна быть принята единица {dep} (--after)')
+    pend = unmet_deps(task, uid)
+    need(not pend, pend[0] if pend else '', 5)
     need(not git(root, 'status', '--porcelain', '--', *u['files']), 'файлы единицы изменены в рабочем дереве — они закреплены за автором Codex')
     if not u['base']:
         u['base'] = head   # зависимая единица берёт текущий HEAD и заново закрепляет файлы
@@ -1538,10 +1656,14 @@ def validate_and_write(task, uid, res, n):
     need(not rep['violations'], 'нарушения зоны/списка файлов: ' + '; '.join(rep['violations']))
 
 
-def do_author(task, uid, effort):
+def do_author(task, uid, effort, wait=0):
     u = task.unit(uid)
     need(u['kind'] == 'frontend', f'{uid}: автор Codex только для frontend-единиц; backend/protected пишет тимлид')
     need(u['status'] == 'open', f'{uid}: единица {u["status"]}')
+    if not (u['worktree'] and Path(u['worktree']).exists()):
+        wait_deps(task, uid, wait)   # до gate и проверок окружения: ожидание вызовов не тратит
+        pend = unmet_deps(task, uid)
+        need(not pend, pend[0] if pend else '', 5)
     n = pending_n(task, uid, 'author', u['author_applied'])
     if f'{uid}:author:{n}' not in task.s['calls']:
         gate(task, uid, 'author')   # до рабочей копии и проверок окружения; незавершённый вызов восстанавливается без нового
@@ -1642,6 +1764,7 @@ def review_prompt(task, uid, n, mode, frm, tip, diff, claude_side):
 
 
 def do_review(task, uid, effort, full):
+    task.sync()   # состав единиц других процессов (владение файлами) на момент ревью
     root, u = task.root, task.unit(uid)
     fe = u['kind'] == 'frontend'
     if fe:
@@ -1737,9 +1860,9 @@ def cmd_cycle(a):
             return 0
         cand, v = u['candidate'], u['verdict']
         if not cand:
-            do_author(t, a.uid, a.effort)
+            do_author(t, a.uid, a.effort, a.wait)
         elif u['checks'] and u['checks']['sha'] == cand and u['checks']['ok'] is False:
-            do_author(t, a.uid, a.effort)
+            do_author(t, a.uid, a.effort, a.wait)
         elif not v or v['sha'] != cand:
             if do_review(t, a.uid, a.effort, False) == 0:
                 u['status'] = 'accepted'
@@ -1751,7 +1874,7 @@ def cmd_cycle(a):
             t.save()
             return 0
         else:
-            do_author(t, a.uid, a.effort)   # FIX/UNCERTAIN возвращается автору автоматически
+            do_author(t, a.uid, a.effort, a.wait)   # FIX/UNCERTAIN возвращается автору автоматически
     raise Blocked('цикл не сошёлся за допустимое число шагов', 2)
 
 
@@ -1760,24 +1883,74 @@ def cmd_integrate(a):
     t = Task(root).load()
     u = t.unit(a.uid)
     need(u['kind'] == 'frontend', 'integrate — для frontend-единиц; backend коммитит сам тимлид')
+    if u['status'] == 'integrated':
+        say(f'Единица {a.uid} уже влита: {(u["merged"] or u["candidate"])[:10]}.')
+        return 0
     cand, v = u['candidate'], u['verdict']
     need(cand and v and v['sha'] == cand and v['value'] == 'PASS' and not u['unmet'],
          'интеграция только после PASS независимого ревью на точном SHA кандидата')
     need(not (u['checks'] and u['checks']['ok'] is False), 'проверки кандидата красные')
     need(verification(t, a.uid), 'интеграция требует успешных механических проверок на точном SHA кандидата (CR checks ' + a.uid +
          ') или зафиксированного обоснования их неприменимости (CR waive); статического PASS недостаточно')
-    need(git(root, 'branch', '--show-current') == t.s['branch'], 'ветка задачи изменилась')
-    head = git(root, 'rev-parse', 'HEAD')
-    need(git(root, 'merge-base', '--is-ancestor', head, cand, check=False).returncode == 0,
-         'ветка задачи ушла вперёд после закрепления базы: нужен новый base и новое ревью (автоматического rebase нет)')
-    need(not git(root, 'status', '--porcelain', '--', *u['files']), 'файлы единицы изменены в основном дереве')
-    if head != cand:
-        git(root, 'merge', '--ff-only', cand)
-    need(git(root, 'rev-parse', 'HEAD') == cand, 'проверка интеграции не прошла')
-    u['status'] = 'integrated'
-    t.save()
-    say(f'Единица {a.uid} влита ff-only в {t.s["branch"]}: {cand[:10]} (push не выполняется).')
+    with Lock(root, 'integrate', wait=1800):   # интеграция последовательна: следующая видит ветку после предыдущей
+        t.sync()
+        need(git(root, 'branch', '--show-current') == t.s['branch'], 'ветка задачи изменилась')
+        head = git(root, 'rev-parse', 'HEAD')
+        need(not git(root, 'status', '--porcelain', '--', *u['files']), 'файлы единицы изменены в основном дереве')
+        if git(root, 'merge-base', '--is-ancestor', head, cand, check=False).returncode == 0:
+            final = cand
+            if head != cand:
+                git(root, 'merge', '--ff-only', cand)
+            how = 'ff-only'
+        else:
+            final = merge_commit(t, a.uid, head)
+            how = f'слияние {head[:10]} + {cand[:10]}'
+            r = git(root, 'merge', '--ff-only', final, check=False)
+            need(r.returncode == 0, 'ветка задачи или файлы единицы изменились во время интеграции: ветка не тронута, повтори integrate. '
+                 + r.stderr.strip()[:200])
+            u['merged'] = final
+        need(git(root, 'rev-parse', 'HEAD') == final, 'проверка интеграции не прошла')
+        u['status'] = 'integrated'
+        t.save()
+    say(f'Единица {a.uid} влита в {t.s["branch"]} ({how}): {final[:10]} (push не выполняется).')
     return 0
+
+
+def merge_commit(t, uid, head):
+    """Ветка задачи ушла вперёд (например, коммиты backend), но не в файлах единицы: кандидат вливается слиянием без конфликтов.
+    Слияние строится без изменения рабочего дерева (merge-tree + commit-tree), итоговый SHA проверяется механическими проверками ДО
+    перемещения ветки: красные проверки или любое расхождение — отказ, ветка не меняется. Коммит детерминирован (даты родителей)."""
+    root, u = t.root, t.unit(uid)
+    cand = u['candidate']
+    need(git(root, 'merge-base', '--is-ancestor', u['base'], head, check=False).returncode == 0,
+         'ветка задачи не содержит базу единицы: нужен новый base и новое ревью (автоматического rebase нет)')
+    touched = git(root, 'diff', '--no-ext-diff', '--name-only', f'{u["base"]}..{head}', '--', *u['files']).splitlines()
+    need(not touched, 'ветка задачи ушла вперёд после закрепления базы и изменила файлы единицы (' + ', '.join(touched[:5]) +
+         '): нужен новый base и новое ревью (автоматического rebase нет)')
+    r = git(root, 'merge-tree', '--write-tree', '--no-messages', head, cand, check=False)
+    need(r.returncode == 0 and r.stdout.strip(), 'слияние ветки задачи с кандидатом невозможно без конфликтов (или нужен git ≥ 2.38): интеграция отказана')
+    tree = r.stdout.split()[0]
+    changed = set(git(root, 'diff', '--no-ext-diff', '--name-only', head, tree).splitlines())
+    need(changed <= set(u['files']), 'слияние затрагивает файлы вне единицы: ' + ', '.join(sorted(changed - set(u['files']))[:5]))
+    need(not git(root, 'diff', '--no-ext-diff', '--name-only', cand, tree, '--', *u['files']),
+         'файлы единицы в слиянии отличаются от принятого кандидата')
+    stamp = max(int(git(root, 'show', '-s', '--format=%ct', x)) for x in (head, cand))
+    env = {**clean_env(), 'GIT_AUTHOR_DATE': f'{stamp} +0000', 'GIT_COMMITTER_DATE': f'{stamp} +0000'}
+    null = 'NUL' if os.name == 'nt' else '/dev/null'
+    c = run(['git', '-c', f'core.hooksPath={null}', '-c', 'commit.gpgsign=false', '-c', 'user.name=agentq', '-c', 'user.email=agentq@users.noreply.local',
+             '-C', root, 'commit-tree', tree, '-p', head, '-p', cand, '-m', f'chore(agentq): integrate {uid} [aq:{t.s["id"]}/{uid}]'], env=env)
+    need(c.returncode == 0 and c.stdout.strip(), 'коммит слияния не создан: ' + c.stderr.strip()[:200])
+    final = c.stdout.strip()
+    old = u['checks']
+    if not (old and old['sha'] == final and (old.get('configured') or old.get('waived')) and (old['ok'] is not None or old.get('waived'))):
+        apply_checks(t, uid, final)   # результат пишет хост; блокер окружения — отказ до перемещения ветки
+    chk = u['checks']
+    if not (chk['ok'] or chk.get('waived')):
+        u['checks'] = old   # свидетельство по кандидату остаётся; красный итоговый результат — в сообщении
+        t.save()
+        need(chk['ok'] is not False, f'проверки итогового SHA {final[:10]} (ветка задачи + кандидат) НЕ прошли — ветка не изменена:\n{chk["tail"]}')
+        need(False, f'проверки итогового SHA {final[:10]} не подтверждены: {chk.get("blocker") or "нет результата"}')
+    return final
 
 
 def cmd_review(a):
@@ -1801,7 +1974,7 @@ def cmd_checks(a):
         need(len(t.s['units']) == 1, 'укажи единицу: ' + ', '.join(t.s['units']))
         uid = next(iter(t.s['units']))
     u = t.unit(uid)
-    tip = u['candidate'] if u['kind'] == 'frontend' else git(t.root, 'rev-parse', 'HEAD')
+    tip = (u['merged'] or u['candidate']) if u['kind'] == 'frontend' else git(t.root, 'rev-parse', 'HEAD')
     need(tip and tip != u['base'], f'{uid}: нет кандидата/коммитов задачи')
     c = apply_checks(t, uid, tip)
     say(f'Проверки {uid} на {tip[:10]}: ' + ('ПРОШЛИ' if c['ok'] else 'НЕ ПРОШЛИ' if c['ok'] is False else 'не применялись') + chr(10) + c['tail'])
@@ -1844,7 +2017,7 @@ def cmd_rethink(a):
 
 
 def cmd_author(a):
-    do_author(Task(repo_root()).load(), a.uid, a.effort)
+    do_author(Task(repo_root()).load(), a.uid, a.effort, a.wait)
     return 0
 
 
@@ -1934,6 +2107,14 @@ def cmd_finish(a):
     return 0 if ok else 1
 
 
+def state_units(root):
+    """Единицы активной задачи без блокировок и проверок (для выбора блокировок); нет задачи или файл не читается — пусто."""
+    try:
+        return [u for u in rjson_retry(Path(root) / '.ai/task/state.json')['units'] if UNIT_RE.fullmatch(u)]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+
+
 def main(argv=None):
     for s in (sys.stdout, sys.stderr):
         if hasattr(s, 'reconfigure'):
@@ -1961,6 +2142,7 @@ def main(argv=None):
         s = sub.add_parser(name)
         s.add_argument('uid')
         s.add_argument('effort', nargs='?', choices=EFFORTS, default='medium')
+        s.add_argument('--wait', type=int, default=0, help='секунд ждать готовности зависимостей --after (без вызовов моделей); иначе код 5 WAIT')
     s = sub.add_parser('review')
     s.add_argument('rest', nargs='*')
     s.add_argument('--full', action='store_true')
@@ -1986,15 +2168,29 @@ def main(argv=None):
             a.uid = others[0] if others else None
         if a.cmd == 'route':
             return cmd_route(a)
-        if a.cmd == 'start':
-            with Lock(repo_root()):
-                return cmd_start(a)
-        with Lock(repo_root()):
-            return {'unit': cmd_unit, 'author': cmd_author, 'cycle': cmd_cycle, 'review': cmd_review,
-                    'integrate': cmd_integrate, 'status': cmd_status, 'finish': cmd_finish, 'checks': cmd_checks,
-                    'waive': cmd_waive, 'rethink': cmd_rethink}[a.cmd](a)
+        if a.cmd == 'status':
+            return cmd_status(a)   # без блокировок: state.json заменяется атомарно, статус можно смотреть во время работы единиц
+        root = repo_root()
+        if a.cmd in ('start', 'unit'):   # структура задачи: одновременно только одна такая команда
+            with Lock(root):
+                return {'start': cmd_start, 'unit': cmd_unit}[a.cmd](a)
+        if a.cmd == 'finish':   # закрытие задачи — только когда не работает ни одна единица
+            with contextlib.ExitStack() as st:
+                st.enter_context(Lock(root))
+                for uid in state_units(root):
+                    st.enter_context(Lock(root, f'unit-{uid}'))
+                return cmd_finish(a)
+        uid = getattr(a, 'uid', None)
+        if uid is None and a.cmd in ('review', 'checks'):
+            units = state_units(root)
+            uid = units[0] if len(units) == 1 else None
+        with contextlib.ExitStack() as st:
+            if uid and UNIT_RE.fullmatch(uid):   # одна команда на единицу; разные единицы выполняются параллельно
+                st.enter_context(Lock(root, f'unit-{uid}'))
+            return {'author': cmd_author, 'cycle': cmd_cycle, 'review': cmd_review, 'integrate': cmd_integrate,
+                    'checks': cmd_checks, 'waive': cmd_waive, 'rethink': cmd_rethink}[a.cmd](a)
     except Blocked as e:
-        print(f'{ {3: "LIMIT", 4: "BUSY"}.get(e.code, "ERROR") }: {e}', file=sys.stderr)
+        print(f'{ {3: "LIMIT", 4: "BUSY", 5: "WAIT"}.get(e.code, "ERROR") }: {e}', file=sys.stderr)
         return e.code
     except (OSError, ValueError, subprocess.SubprocessError, KeyError, TypeError, AttributeError, IndexError) as e:
         print(f'ERROR: {type(e).__name__}: {e}', file=sys.stderr)

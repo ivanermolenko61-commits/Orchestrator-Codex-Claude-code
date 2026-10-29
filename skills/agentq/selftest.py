@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -33,13 +34,28 @@ if a[:2] == ['features', 'list']:
 prompt = sys.stdin.read()
 author = '--output-schema' in a
 out = a[a.index('-o') + 1] if '-o' in a else a[a.index('--output-last-message') + 1]
-n = int((d / 'codex.count').read_text()) if (d / 'codex.count').exists() else 0
-(d / 'codex.count').write_text(str(n + 1))
+def claim(prefix):   # атомарный счётчик: вызовы могут идти одновременно
+    i = 0
+    while True:
+        try:
+            (d / f'{prefix}.claim-{i}').open('x').close(); return i
+        except FileExistsError:
+            i += 1
+n = claim('codex')
+role = 'author' if author else 'review'
 with (d / 'calls.log').open('a') as f:
     f.write(('codex-author' if author else 'codex-review') + ' model=' + a[a.index('-m') + 1] + ' tools_off=' + str('shell_tool' in a) + '\n')
 (d / f'codex-prompt-{n}.txt').write_text(prompt, encoding='utf-8')
-sc = json.loads((d / 'codex.json').read_text())[n]
-if sc.get('sleep'): time.sleep(sc['sleep'])
+items = json.loads((d / 'codex.json').read_text())
+# сценарии с ключом role выбираются по роли (порядок старта параллельных вызовов не определён), остальные — по номеру вызова
+sc = [e for e in items if e.get('role') == role][claim('codex-' + role)] if any('role' in e for e in items) else items[n]
+with (d / 'timeline.log').open('a') as f:
+    f.write(f'{time.time()} start codex-{role}\n')
+try:
+    if sc.get('sleep'): time.sleep(sc['sleep'])
+finally:
+    with (d / 'timeline.log').open('a') as f:
+        f.write(f'{time.time()} end codex-{role}\n')
 if sc.get('fail'): print('rate limit 429', file=sys.stderr); sys.exit(1)
 if author:
     if sc.get('tool'):
@@ -59,8 +75,12 @@ a = sys.argv[1:]
 if a[:2] == ['auth', 'status']:
     print(json.dumps({'loggedIn': True, 'authMethod': 'claude.ai'})); sys.exit(0)
 prompt = sys.stdin.read()
-n = int((d / 'claude.count').read_text()) if (d / 'claude.count').exists() else 0
-(d / 'claude.count').write_text(str(n + 1))
+n = 0
+while True:
+    try:
+        (d / f'claude.claim-{n}').open('x').close(); break
+    except FileExistsError:
+        n += 1
 with (d / 'calls.log').open('a') as f:
     f.write('claude-review model=' + a[a.index('--model') + 1] + ' tools=' + repr(a[a.index('--tools') + 1]) + ' nosession=' + str('--no-session-persistence' in a) + '\n')
 (d / f'claude-prompt-{n}.txt').write_text(prompt, encoding='utf-8')
@@ -148,7 +168,7 @@ class Proj:
         self.git('add', '-A')
         self.git('commit', '-q', '-m', 'init')
         self.env = dict(os.environ)
-        self.env.update(AQ_WORKTREES=str(self.wt), AQ_NO_ORPHAN_SCAN='1', FAKE_DIR=str(self.fake),
+        self.env.update(AQ_WORKTREES=str(self.wt), FAKE_DIR=str(self.fake),
                         CODEX_BIN=json.dumps([sys.executable, str(self.fake / 'fake_codex.py')]),
                         CLAUDE_BIN=json.dumps([sys.executable, str(self.fake / 'fake_claude.py')]),
                         DOCKER_BIN=json.dumps([sys.executable, str(self.fake / 'fake_docker.py')]))
@@ -372,7 +392,6 @@ def t_limits_recovery():
 
 
 def t_engine_recovery():
-    os.environ['AQ_NO_ORPHAN_SCAN'] = '1'
     eng = load_engine()
     p = Proj('recovery')
     p.cr('start', 'восстановление', '--id', 'rec-1')
@@ -606,9 +625,22 @@ def t_unavailable_and_modes():
                            f'l=m.Lock(Path(r"{b.repo}")).__enter__();print("held",flush=True);time.sleep(20)'],
                           stdout=subprocess.PIPE, text=True)
     p2.stdout.readline()
-    rc, _, err = b.cr('status')
+    rc, _, err = b.cr('unit', 'x1', '--kind', 'backend', '--files', 'backend/app.py')
+    rc_status, _, _ = b.cr('status')
     p2.kill()
-    check('параллельный запуск в том же репозитории → BUSY (4)', rc == 4, err)
+    check('структурная команда при занятой структуре задачи → BUSY (4); status блокировкой не задерживается', rc == 4 and rc_status == 0, err)
+    b.cr('start', 'занято', '--id', 'busy-1')
+    p3 = subprocess.Popen([sys.executable, '-c',
+                           'import importlib.util,sys,time;from pathlib import Path;'
+                           f's=importlib.util.spec_from_file_location("e",r"{ENGINE}");m=importlib.util.module_from_spec(s);s.loader.exec_module(m);'
+                           f'l=m.Lock(Path(r"{b.repo}"),"unit-main").__enter__();print("held",flush=True);time.sleep(20)'],
+                          stdout=subprocess.PIPE, text=True)
+    p3.stdout.readline()
+    rc, _, err = b.cr('review', 'main')
+    rc_f, _, err_f = b.cr('finish')
+    rc_s, _, _ = b.cr('status')
+    p3.kill()
+    check('та же единица занята → BUSY (4); finish при работающей единице → BUSY; status доступен', rc == 4 and rc_f == 4 and rc_s == 0, err + err_f)
 
 
 def t_mixed():
@@ -621,7 +653,7 @@ def t_mixed():
                        {'text': 'VERDICT: PASS'}, {'files': FILES_OK1}])
     p.script('claude', [OK])
     rc, _, err = p.cr('cycle', 'fe')
-    check('mixed: frontend не стартует, пока backend не принят; вызовов нет', rc == 2 and 'принята единица be' in err and not p.calls(), err)
+    check('mixed: frontend не стартует, пока backend не принят; вызовов нет, код 5 WAIT', rc == 5 and 'принята единица be' in err and 'WAIT' in err and not p.calls(), err)
     p.commit('backend/app.py', 'def add(a, b):\n    return a + b\n# контракт: GET /items\n')
     rc, _, _ = p.cr('review', 'be')
     check('mixed: backend (автор Claude) ревьюит Codex, FIX', rc == 1 and p.count('codex-review') == 1)
@@ -631,8 +663,20 @@ def t_mixed():
     rc, out, err = p.cr('cycle', 'fe')
     check('mixed: затем frontend от Codex, ревью Claude, PASS', rc == 0 and p.count('codex-author') == 1 and p.count('claude-review') == 1, out + err)
     p.commit('package.json', '{"name": "x"}\n', 'deps')
-    rc, _, err = p.cr('integrate', 'fe')
-    check('mixed: ветка ушла вперёд после закрепления базы → интеграция отказана (последовательность)', rc == 2 and 'ушла вперёд' in err, err)
+    rc, out, err = p.cr('integrate', 'fe')
+    check('mixed: ветка ушла вперёд без файлов единицы → слияние без конфликтов, оба набора изменений в ветке', rc == 0 and 'слияние' in out
+          and len(p.git('rev-list', '--parents', '-n1', 'HEAD').split()) == 3 and (p.repo / 'package.json').read_text(encoding='utf-8').count('name') == 1
+          and 'className' in (p.repo / FE_FILES[0]).read_text(encoding='utf-8'), out + err)
+    q = Proj('mixed-overlap')
+    q.cr('start', 'пересечение', '--id', 'ov-1', '--kind', 'mixed', '--contract-file', q.contract())
+    q.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    q.script('codex', [{'files': FILES_OK1}])
+    q.script('claude', [OK])
+    q.cr('cycle', 'fe')
+    q.commit(FE_FILES[1], TEST_V1 + "test('d', () => {});\n", 'чужая правка файла единицы')
+    rc, _, err = q.cr('integrate', 'fe')
+    check('mixed: ветка ушла вперёд и изменила файлы единицы → интеграция отказана, ветка не тронута', rc == 2 and 'изменила файлы единицы' in err
+          and q.git('rev-list', '--count', 'HEAD') == '2', err)
 
 
 def commit_with_paths(repo, paths):
@@ -1705,10 +1749,195 @@ def t_links():
     check('has_link видит junction/symlink в компоненте пути', eng.has_link(d, 'junc/f.txt') and not eng.has_link(d, 'real/f.txt'))
 
 
+def bg(p, *args, env=None):
+    e = dict(p.env)
+    e.update(env or {})
+    return subprocess.Popen([sys.executable, str(ENGINE), *map(str, args)], cwd=p.repo, env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding='utf-8')
+
+
+def done(pr, timeout=240):
+    out, err = pr.communicate(timeout=timeout)
+    return pr.returncode, out, err
+
+
+def until(cond, secs=40):
+    end = time.time() + secs
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def intervals(p):
+    """Интервалы работы поддельного Codex из timeline.log: {роль: [(начало, конец)]}."""
+    f = p.fake / 'timeline.log'
+    cur, out = {}, {}
+    for line in (f.read_text(encoding='utf-8').splitlines() if f.exists() else []):
+        t, ev, name = line.split()
+        if ev == 'start':
+            cur.setdefault(name, []).append(float(t))
+        else:
+            out.setdefault(name, []).append((cur[name].pop(0), float(t)))
+    return out
+
+
+def drive(p, code):
+    """Прямой вызов движка в отдельном процессе (имитация упавшего/параллельного процесса)."""
+    pre = ('import importlib.util,os,sys\nfrom pathlib import Path\n'
+           f's=importlib.util.spec_from_file_location("e",r"{ENGINE}");m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n'
+           f'os.chdir(r"{p.repo}");t=m.Task(Path(r"{p.repo}")).load()\n')
+    return subprocess.run([sys.executable, '-c', pre + code], capture_output=True, text=True, encoding='utf-8', env=p.env, timeout=120)
+
+
+def t_parallel():
+    # --- А. независимые backend и frontend работают одновременно, ветка уходит вперёд, интеграция слиянием, приёмка по итоговому SHA
+    p = Proj('par')
+    p.cr('start', 'параллельно', '--id', 'par-1', '--kind', 'mixed', '--contract-file', p.contract())
+    p.cr('unit', 'be', '--kind', 'backend', '--files', 'backend/app.py')
+    p.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    p.script('codex', [{'role': 'author', 'files': FILES_OK1, 'sleep': 4}, {'role': 'review', 'text': 'VERDICT: PASS', 'sleep': 4}])
+    p.script('claude', [OK])
+    fe = bg(p, 'cycle', 'fe')
+    check('parallel: база frontend закреплена, автор Codex работает', until(lambda: rstate(p)['units']['fe']['base'] and p.count('codex-author') == 1))
+    p.commit('backend/app.py', 'def add(a, b):\n    return a + b\n# параллельный коммит backend\n')
+    t0 = time.time()
+    be = bg(p, 'review', 'be')
+    rc_s, _, _ = p.cr('status')
+    check('parallel: status не ждёт работающих единиц', rc_s == 0 and time.time() - t0 < 4)
+    rc_be, _, err_be = done(be)
+    rc_fe, out_fe, err_fe = done(fe)
+    check('parallel: обе части завершились (backend PASS, frontend PASS)', rc_be == 0 and rc_fe == 0, err_be + err_fe + out_fe)
+    iv = intervals(p)
+    a_iv, r_iv = iv['codex-author'][0], iv['codex-review'][0]
+    check('parallel: вызовы Codex-автора (frontend) и Codex-ревью (backend) выполнялись одновременно', a_iv[0] < r_iv[1] and r_iv[0] < a_iv[1], iv)
+    st = rstate(p)
+    check('parallel: ничего не потеряно — 3 вызова с receipts, вердикты и кандидат на месте',
+          len(st['calls']) == 3 and st['units']['be']['verdict']['value'] == 'PASS' and st['units']['fe']['status'] == 'accepted'
+          and all((p.repo / '.ai/task/calls' / k.replace(':', '-') / 'receipt.json').exists() for k in st['calls']), st['calls'].keys())
+    check('parallel: общий учёт вызовов цепочки = 3 (автор 1, ревью 2)', p.count('codex-author') == 1 and p.count('codex-review') == 1 and p.count('claude-review') == 1)
+    head0 = p.git('rev-parse', 'HEAD')
+    rc, out, err = p.cr('integrate', 'fe')
+    merged = p.git('rev-parse', 'HEAD')
+    check('parallel: интеграция — слияние, не ff (ветка ушла вперёд без файлов единицы)', rc == 0 and merged != head0 and
+          p.git('rev-parse', 'HEAD^1') == head0 and p.git('rev-parse', 'HEAD^2') == rstate(p)['units']['fe']['candidate'], out + err)
+    src = (p.fake / 'last-src-list.txt').read_text(encoding='utf-8').splitlines()
+    check('parallel: проверки итогового SHA запущены на дереве слияния (backend + frontend вместе)', rstate(p)['units']['fe']['checks']['sha'] == merged
+          and 'backend/app.py' in src and FE_FILES[0] in src, rstate(p)['units']['fe']['checks'].get('sha'))
+    rc, out, err = p.cr('finish')
+    check('parallel: finish → ACCEPTANCE: VERIFIED на итоговом SHA', rc == 0 and 'ACCEPTANCE: VERIFIED' in out, out + err)
+
+    # --- Б. красные проверки итогового SHA: ветка не двигается; после исправления интеграция проходит
+    r = Proj('par-red')
+    r.cr('start', 'красный итог', '--id', 'red-1', '--kind', 'mixed', '--contract-file', r.contract())
+    r.cr('unit', 'be', '--kind', 'backend', '--files', 'backend/app.py')
+    r.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    r.script('codex', [{'role': 'author', 'files': FILES_OK1}])
+    r.script('claude', [OK])
+    fe = bg(r, 'cycle', 'fe')
+    done(fe)
+    r.commit('backend/app.py', 'def add(a, b):\n    return a + b  # FAIL_test\n')
+    head0 = r.git('rev-parse', 'HEAD')
+    rc, _, err = r.cr('integrate', 'fe')
+    check('parallel: красные проверки итогового SHA → интеграция отказана, ветка и единица не изменены',
+          rc == 2 and 'НЕ прошли' in err and r.git('rev-parse', 'HEAD') == head0 and rstate(r)['units']['fe']['status'] == 'accepted'
+          and not rstate(r)['units']['fe']['merged'], err)
+    r.commit('backend/app.py', 'def add(a, b):\n    return a + b\n', 'исправление')
+    rc, out, err = r.cr('integrate', 'fe')
+    check('parallel: после исправления ветки интеграция проходит, модели не вызывались повторно', rc == 0 and r.count('codex-author') == 1 and r.count('claude-review') == 1, out + err)
+
+    # --- В. две интеграции одновременно выстраиваются последовательно
+    q = Proj('par-int', extra={'frontend/src/B.tsx': APP_OLD})
+    q.cr('start', 'две интеграции', '--id', 'int-1', '--kind', 'mixed', '--contract-file', q.contract())
+    q.cr('unit', 'f1', '--kind', 'frontend', '--files', 'frontend/src/App.tsx')
+    q.cr('unit', 'f2', '--kind', 'frontend', '--files', 'frontend/src/B.tsx')
+    q.script('codex', [{'files': {'frontend/src/App.tsx': APP_V1}}, {'files': {'frontend/src/B.tsx': APP_V1}}])
+    q.script('claude', [OK, OK])
+    q.cr('cycle', 'f1')
+    q.cr('cycle', 'f2')
+    a1, a2 = bg(q, 'integrate', 'f1'), bg(q, 'integrate', 'f2')
+    (rc1, o1, e1), (rc2, o2, e2) = done(a1), done(a2)
+    tree = q.git('ls-tree', '-r', 'HEAD', '--name-only').splitlines()
+    check('parallel: две одновременные интеграции — обе успешны по очереди, оба файла в ветке, один слиянием',
+          rc1 == 0 and rc2 == 0 and 'className' in (q.repo / 'frontend/src/App.tsx').read_text(encoding='utf-8')
+          and 'className' in (q.repo / 'frontend/src/B.tsx').read_text(encoding='utf-8')
+          and len(q.git('rev-list', '--merges', 'HEAD').splitlines()) == 1 and 'frontend/src/B.tsx' in tree, o1 + e1 + o2 + e2)
+    rc, out, _ = q.cr('finish')
+    check('parallel: finish после двух интеграций → VERIFIED', rc == 0 and 'ACCEPTANCE: VERIFIED' in out, out)
+
+    # --- Г. общий бюджет при одновременном резервировании: предел Ивана 2, три параллельных ревью → ровно два вызова
+    b = Proj('par-budget')
+    b.cr('start', 'общий бюджет', '--id', 'bud-1', '--max-calls', '2')
+    for n in (1, 2, 3):
+        b.cr('unit', f'b{n}', '--kind', 'backend', '--files', f'backend/m{n}.py')
+    for n in (1, 2, 3):
+        b.commit(f'backend/m{n}.py', f'X = {n}\n')
+    b.script('codex', [{'role': 'review', 'text': 'VERDICT: PASS', 'sleep': 2}] * 3)
+    ps = [bg(b, 'review', f'b{n}') for n in (1, 2, 3)]
+    codes = sorted(done(x)[0] for x in ps)
+    st = rstate(b)
+    check('parallel: предел 2 при трёх одновременных ревью — ровно два вызова, третий LIMIT (3), резервы не потеряны',
+          codes == [0, 0, 3] and len(st['calls']) == 2 and b.count('codex-review') == 2, (codes, len(st['calls'])))
+
+    # --- Д. одновременное создание единиц с общим файлом: владелец один
+    o = Proj('par-own')
+    o.cr('start', 'владение', '--id', 'own-1')
+    x1, x2 = bg(o, 'unit', 'u1', '--kind', 'backend', '--files', 'backend/app.py'), bg(o, 'unit', 'u2', '--kind', 'backend', '--files', 'backend/app.py')
+    codes = sorted([done(x1)[0], done(x2)[0]])
+    owners = [k for k, v in rstate(o)['units'].items() if 'backend/app.py' in v['files']]
+    check('parallel: два одновременных unit с одним файлом — успешен ровно один, владелец один', codes[0] == 0 and codes[1] != 0 and len(owners) == 1, (codes, owners))
+
+    # --- Е. зависимая единица ждёт backend без расхода, затем стартует
+    w = Proj('par-wait')
+    w.cr('start', 'ожидание', '--id', 'wait-1', '--kind', 'mixed', '--contract-file', w.contract())
+    w.cr('unit', 'be', '--kind', 'backend', '--files', 'backend/app.py')
+    w.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES, '--after', 'be')
+    w.script('codex', [{'role': 'author', 'files': FILES_OK1}, {'role': 'review', 'text': 'VERDICT: PASS'}])
+    w.script('claude', [OK])
+    rc, _, err = w.cr('cycle', 'fe', '--wait', '1', env={'AQ_POLL': '0.2'})
+    check('parallel: --wait без готовой зависимости истёк → WAIT (5), вызовов нет', rc == 5 and not w.calls(), err)
+    fe = bg(w, 'cycle', 'fe', '--wait', '120', env={'AQ_POLL': '0.2'})
+    time.sleep(2.5)
+    check('parallel: зависимая единица ждёт и не тратит вызовы', fe.poll() is None and not w.calls())
+    w.commit('backend/app.py', 'def add(a, b):\n    return a + b\n# готово\n')
+    rc_be, _, _ = w.cr('review', 'be')
+    rc_fe, out, err = done(fe)
+    iv = intervals(w)
+    check('parallel: после PASS backend frontend стартует сам и доходит до PASS; автор начал после ревью backend',
+          rc_be == 0 and rc_fe == 0 and iv['codex-author'][0][0] >= iv['codex-review'][0][1], out + err)
+
+    # --- Ж. прерывание: упавший процесс не теряет чужие результаты; готовый ответ читается без повторной оплаты, неопределённый — не повторяется
+    k = Proj('par-kill')
+    k.cr('start', 'прерывание', '--id', 'kill-1', '--kind', 'mixed', '--contract-file', k.contract())
+    k.cr('unit', 'be', '--kind', 'backend', '--files', 'backend/app.py')
+    k.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    k.commit('backend/app.py', 'def add(a, b):\n    return a + b\n# k\n')
+    k.script('codex', [{'role': 'author', 'files': FILES_OK1, 'sleep': 6}])
+    fe = bg(k, 'cycle', 'fe')
+    until(lambda: any(c.startswith('fe:author') for c in rstate(k)['calls']))
+    crash = drive(k, 'def crash(d, prompt):\n    (d / "raw.txt").write_text("- [MINOR] x — y.\\nVERDICT: PASS", encoding="utf-8"); os._exit(7)\n'
+                     'm.model_call(t, "be", "review", 1, "codex-review", "PROMPT", crash, m.parse_codex_review)\n')
+    check('parallel: процесс backend умер после сохранения ответа (7), пока frontend работает', crash.returncode == 7, crash.stderr)
+    fe.kill()
+    fe.communicate()
+    n_before = len(rstate(k)['calls'])
+    res = drive(k, 'def never(d, prompt):\n    print("RELAUNCH")\n'
+                   'r = m.model_call(t, "be", "review", 1, "codex-review", "PROMPT", never, m.parse_codex_review)\nprint(r["verdict"])\n')
+    st = rstate(k)
+    check('parallel: готовый ответ упавшего процесса читается без нового вызова, резервы обоих процессов сохранены',
+          res.stdout.split() == ['PASS'] and set(st['calls']) == {'fe:author:1', 'be:review:1'} and len(st['calls']) == n_before, (res.stdout, res.stderr, list(st['calls'])))
+    rc, _, err = k.cr('cycle', 'fe')
+    check('parallel: пока процесс прерванного вызова жив — BUSY, повторного вызова нет', rc == 4 and k.count('codex-author') == 1, err)
+    time.sleep(7)
+    rc, _, err = k.cr('cycle', 'fe')
+    check('parallel: ответ прерванного вызова не получен — повтор запрещён, оплата не повторяется', rc == 2 and 'повтор' in err and k.count('codex-author') == 1, err)
+
+
 def main():
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding='utf-8', errors='replace')
-    for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_task_budget_scope, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links,
+    for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_task_budget_scope, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links, t_parallel,
               t_unavailable_and_modes):
         try:
             t()

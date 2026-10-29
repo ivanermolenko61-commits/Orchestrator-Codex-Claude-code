@@ -1,5 +1,5 @@
 {
-  "version": "1.1.1",
+  "version": "1.2.0",
   "source_of_truth": "ivanermolenko61-commits/Orchestrator-Codex-Claude-code",
   "engine_origin": {
     "repository": "ivanermolenko61-commits/ai-knowledge",
@@ -69,8 +69,8 @@
       "git_blob": "60d1b412a46d37040649119db4d24ee0f3bf76d9"
     },
     "README.md": {
-      "sha256": "e49e02c919dcb77b1201aad233e81a0d2de1f2c377293d8841c5d75780e2e570",
-      "git_blob": "11a67d1c87e0a356e1dd79ede086b7e027721de4"
+      "sha256": "a87be29c99d4d2cbf6f27c493a46509c8b417764a2b29c1bc9eaef4916114e39",
+      "git_blob": "9c8efc854fa4b3933abda943068a4d424796e8a1"
     },
     "scripts/install-global.sh": {
       "sha256": "b66806667f561d4ceda10d6fe017bf767bc217c2da46c62d4a6978473046cb6b",
@@ -85,24 +85,24 @@
       "git_blob": "f5683b1af358ca61e9600f4b4547af176ca18d38"
     },
     "skills/agentq/agentq_global.py": {
-      "sha256": "30c215c45aa4d53aed72b4dfd26d1945c1987f6f94799ecd7cc9f2aae2c00ba6",
-      "git_blob": "428a3fb446dd7321363c5e9be785d0f42b85a0e3"
+      "sha256": "98e91a766e73214513f4425cef9145f0f05c413e924a7e9382ecaea2d2284d54",
+      "git_blob": "89bfcfbe05d91891c9fa05796a8990d8cc63f182"
     },
     "skills/agentq/codex-review.sh": {
       "sha256": "c78dc298bb0520f6c4c76b60133b3628d715e1db9947ed4ccb2a245a49ae4a3e",
       "git_blob": "cb0ab9fbe888925f8d53cd716d714841454bb898"
     },
     "skills/agentq/selftest.py": {
-      "sha256": "75a378242b87a6ac01a649ed873e306e77d4e2ee04f86893d76df3ce36479e45",
-      "git_blob": "b0918e9c5a87c97105b7ea81a9620a9a3fa2ac74"
+      "sha256": "49a434e0453f0209563d8ea92320feea5ae16edac719d5bdaffb487b8d54e513",
+      "git_blob": "274d100d819f35263b72e2ea6c8585979a198793"
     },
     "skills/agentq/SKILL.md": {
-      "sha256": "66e14ab831073cbc35458a578510718a41dd43fa9df38d76e2abbceb897118bc",
-      "git_blob": "60bcde943fdc2aa26337c4d540e9b5caaf2bc030"
+      "sha256": "f888b79f729dda21149f7191f2548338998f76e1381be2f68b48100ca559865a",
+      "git_blob": "21bea6dc74466b031c3550079b02275c83d7b21a"
     },
     "VERSION": {
-      "sha256": "cc52f678848b814373757b460383bf61960e4943c203735adde0a350b3e50989",
-      "git_blob": "524cb55242b53f6a64cc646ea05db6acc7696d2d"
+      "sha256": "1e5b51cde515396a9fa762909cf8ca6584ccc564b325d2eebeea76175fe95c4d",
+      "git_blob": "26aaba0e86632e4d537006e45b0ec918d780b3b4"
     }
   }
 }
