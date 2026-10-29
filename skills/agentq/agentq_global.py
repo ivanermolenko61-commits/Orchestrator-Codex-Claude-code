@@ -827,6 +827,7 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser):
     # процесса одновременно заняли бы последнее место. Осиротевший вызов этой единицы ловится выше по pid из process.json; чужие
     # процессы codex (другие единицы, сторонние сессии) вызов не блокируют.
     with task.txn():
+        need(key not in task.s['calls'], f'BUSY: вызов {key} уже зарезервирован другим процессом', 4)   # свежее состояние: второй платный вызов того же ключа невозможен
         ledger(task.root)   # повреждение журнала после start обнаруживается до платного вызова, а не на finish
         gate(task, uid, role)
         need(len(prompt.encode('utf-8')) <= MAX_PROMPT, f'запрос {len(prompt.encode())} байт > {MAX_PROMPT}: раздели задачу')
@@ -1897,18 +1898,27 @@ def cmd_integrate(a):
         need(git(root, 'branch', '--show-current') == t.s['branch'], 'ветка задачи изменилась')
         head = git(root, 'rev-parse', 'HEAD')
         need(not git(root, 'status', '--porcelain', '--', *u['files']), 'файлы единицы изменены в основном дереве')
+        if u['merged'] and git(root, 'merge-base', '--is-ancestor', u['merged'], head, check=False).returncode == 0:
+            # прошлый integrate успел переместить ветку на проверенный SHA слияния, но не записал статус (сбой/обрыв): завершаем запись
+            u['status'] = 'integrated'
+            t.save()
+            say(f'Единица {a.uid} уже влита слиянием {u["merged"][:10]}: состояние дозаписано (push не выполняется).')
+            return 0
         if git(root, 'merge-base', '--is-ancestor', head, cand, check=False).returncode == 0:
             final = cand
+            u['merged'] = None
+            need(verification(t, a.uid), 'интеграция требует успешных механических проверок на точном SHA кандидата (CR checks ' + a.uid + ')')
             if head != cand:
                 git(root, 'merge', '--ff-only', cand)
             how = 'ff-only'
         else:
             final = merge_commit(t, a.uid, head)
             how = f'слияние {head[:10]} + {cand[:10]}'
+            u['merged'] = final   # намерение сохраняется ДО перемещения ветки: проверки записаны на final, повтор после обрыва завершит запись
+            t.save()
             r = git(root, 'merge', '--ff-only', final, check=False)
             need(r.returncode == 0, 'ветка задачи или файлы единицы изменились во время интеграции: ветка не тронута, повтори integrate. '
                  + r.stderr.strip()[:200])
-            u['merged'] = final
         need(git(root, 'rev-parse', 'HEAD') == final, 'проверка интеграции не прошла')
         u['status'] = 'integrated'
         t.save()
@@ -1956,9 +1966,7 @@ def merge_commit(t, uid, head):
 def cmd_review(a):
     t = Task(repo_root()).load()
     uid = a.uid
-    if not uid:
-        need(len(t.s['units']) == 1, 'укажи единицу: ' + ', '.join(t.s['units']))
-        uid = next(iter(t.s['units']))
+    need(uid, 'укажи единицу: ' + (', '.join(t.s['units']) or 'единиц нет'))   # единица выбрана в main() ДО блокировки; здесь не угадывается
     code = do_review(t, uid, a.effort, a.full)
     if code == 0 and t.s['units'][uid]['kind'] != 'frontend':
         t.s['units'][uid]['status'] = 'accepted'
@@ -1970,9 +1978,7 @@ def cmd_checks(a):
     """Механические проверки на точном SHA без вызова модели (после устранения блокера окружения или для повторной проверки)."""
     t = Task(repo_root()).load()
     uid = a.uid
-    if not uid:
-        need(len(t.s['units']) == 1, 'укажи единицу: ' + ', '.join(t.s['units']))
-        uid = next(iter(t.s['units']))
+    need(uid, 'укажи единицу: ' + (', '.join(t.s['units']) or 'единиц нет'))   # единица выбрана в main() ДО блокировки; здесь не угадывается
     u = t.unit(uid)
     tip = (u['merged'] or u['candidate']) if u['kind'] == 'frontend' else git(t.root, 'rev-parse', 'HEAD')
     need(tip and tip != u['base'], f'{uid}: нет кандидата/коммитов задачи')
@@ -2183,7 +2189,7 @@ def main(argv=None):
         uid = getattr(a, 'uid', None)
         if uid is None and a.cmd in ('review', 'checks'):
             units = state_units(root)
-            uid = units[0] if len(units) == 1 else None
+            uid = a.uid = units[0] if len(units) == 1 else None   # единица известна до блокировки и передаётся команде
         with contextlib.ExitStack() as st:
             if uid and UNIT_RE.fullmatch(uid):   # одна команда на единицу; разные единицы выполняются параллельно
                 st.enter_context(Lock(root, f'unit-{uid}'))

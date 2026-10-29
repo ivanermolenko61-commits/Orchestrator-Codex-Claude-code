@@ -1846,6 +1846,12 @@ def t_parallel():
     r.commit('backend/app.py', 'def add(a, b):\n    return a + b\n', 'исправление')
     rc, out, err = r.cr('integrate', 'fe')
     check('parallel: после исправления ветки интеграция проходит, модели не вызывались повторно', rc == 0 and r.count('codex-author') == 1 and r.count('claude-review') == 1, out + err)
+    merged_sha, runs = r.git('rev-parse', 'HEAD'), len(docker_runs(r))
+    state_edit(r, lambda st: st['units']['fe'].update(status='accepted'))   # обрыв после перемещения ветки, до записи статуса
+    rc, out, err = r.cr('integrate', 'fe')
+    check('parallel: обрыв integrate после перемещения ветки — повтор дозаписывает статус без новых проверок и вызовов',
+          rc == 0 and 'дозаписано' in out and rstate(r)['units']['fe']['status'] == 'integrated' and r.git('rev-parse', 'HEAD') == merged_sha
+          and len(docker_runs(r)) == runs, out + err)
 
     # --- В. две интеграции одновременно выстраиваются последовательно
     q = Proj('par-int', extra={'frontend/src/B.tsx': APP_OLD})
@@ -1887,6 +1893,16 @@ def t_parallel():
     codes = sorted([done(x1)[0], done(x2)[0]])
     owners = [k for k, v in rstate(o)['units'].items() if 'backend/app.py' in v['files']]
     check('parallel: два одновременных unit с одним файлом — успешен ровно один, владелец один', codes[0] == 0 and codes[1] != 0 and len(owners) == 1, (codes, owners))
+    o.cr('unit', 'u3', '--kind', 'backend', '--files', 'backend/other.py')
+    rc, _, err = o.cr('review')
+    check('parallel: review без uid при нескольких единицах — отказ до блокировок и вызовов', rc == 2 and 'укажи единицу' in err and not o.calls(), err)
+    res = drive(o, 't2 = m.Task(Path(r"' + str(o.repo) + '")).load()\n'
+                   't2.s["calls"]["u1:review:1"] = {"unit": "u1", "role": "review", "kind": "codex-review", "n": 1, "prompt_sha256": "x", "prompt_bytes": 1, "at": 0}\n'
+                   't2.save()\n'
+                   'try:\n    m.model_call(t, "u1", "review", 1, "codex-review", "P", lambda d, p: print("LAUNCHED"), m.parse_codex_review)\n'
+                   'except m.Blocked as e:\n    print("BLOCKED", e.code)\n')
+    check('parallel: ключ вызова, зарезервированный другим процессом, перепроверяется в транзакции — второй вызов не запущен',
+          res.stdout.split() == ['BLOCKED', '4'], res.stdout + res.stderr)
 
     # --- Е. зависимая единица ждёт backend без расхода, затем стартует
     w = Proj('par-wait')

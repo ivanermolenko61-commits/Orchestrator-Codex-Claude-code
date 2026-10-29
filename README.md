@@ -78,7 +78,7 @@ bash scripts/test-install-global.sh
 py -3 skills/agentq/selftest.py
 ```
 
-Selftest использует поддельные CLI и временные Git-проекты; живых модельных запросов нет. Он требует установленный ~/.claude/scripts/agentsrules.py и ищет его через домашний каталог пользователя. Для проверки без затрагивания рабочей установки создать пустой каталог `<home>`, задать `HOME`/`USERPROFILE` на него и `CLAUDE_HOME=<home>/.claude`, выполнить `install-global.sh --apply --core-only` и запустить установленный `selftest.py` (на 1.2.0: 293/293).
+Selftest использует поддельные CLI и временные Git-проекты; живых модельных запросов нет. Он требует установленный ~/.claude/scripts/agentsrules.py и ищет его через домашний каталог пользователя. Для проверки без затрагивания рабочей установки создать пустой каталог `<home>`, задать `HOME`/`USERPROFILE` на него и `CLAUDE_HOME=<home>/.claude`, выполнить `install-global.sh --apply --core-only` и запустить установленный `selftest.py` (на 1.2.0: 296/296).
 
 Целостность пакета проверяет `python scripts/manifest.py check` (она же входит в `test-install-global.sh`); после правки файлов — `python scripts/manifest.py write`. На среде с python3 вместо Windows launcher заменить py -3 на python3. Прогон на Linux не подтверждает совместимость экспорта с файловыми системами за пределами NTFS.
 
