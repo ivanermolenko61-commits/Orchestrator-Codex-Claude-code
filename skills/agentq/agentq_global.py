@@ -1891,8 +1891,6 @@ def cmd_integrate(a):
     need(cand and v and v['sha'] == cand and v['value'] == 'PASS' and not u['unmet'],
          'интеграция только после PASS независимого ревью на точном SHA кандидата')
     need(not (u['checks'] and u['checks']['ok'] is False), 'проверки кандидата красные')
-    need(verification(t, a.uid), 'интеграция требует успешных механических проверок на точном SHA кандидата (CR checks ' + a.uid +
-         ') или зафиксированного обоснования их неприменимости (CR waive); статического PASS недостаточно')
     with Lock(root, 'integrate', wait=1800):   # интеграция последовательна: следующая видит ветку после предыдущей
         t.sync()
         need(git(root, 'branch', '--show-current') == t.s['branch'], 'ветка задачи изменилась')
@@ -1907,15 +1905,14 @@ def cmd_integrate(a):
         if git(root, 'merge-base', '--is-ancestor', head, cand, check=False).returncode == 0:
             final = cand
             u['merged'] = None
-            need(verification(t, a.uid), 'интеграция требует успешных механических проверок на точном SHA кандидата (CR checks ' + a.uid + ')')
+            need(verification(t, a.uid), 'интеграция требует успешных механических проверок на точном SHA кандидата (CR checks ' + a.uid +
+                 ') или зафиксированного обоснования их неприменимости (CR waive); статического PASS недостаточно')
             if head != cand:
                 git(root, 'merge', '--ff-only', cand)
             how = 'ff-only'
         else:
             final = merge_commit(t, a.uid, head)
             how = f'слияние {head[:10]} + {cand[:10]}'
-            u['merged'] = final   # намерение сохраняется ДО перемещения ветки: проверки записаны на final, повтор после обрыва завершит запись
-            t.save()
             r = git(root, 'merge', '--ff-only', final, check=False)
             need(r.returncode == 0, 'ветка задачи или файлы единицы изменились во время интеграции: ветка не тронута, повтори integrate. '
                  + r.stderr.strip()[:200])
@@ -1952,14 +1949,21 @@ def merge_commit(t, uid, head):
     need(c.returncode == 0 and c.stdout.strip(), 'коммит слияния не создан: ' + c.stderr.strip()[:200])
     final = c.stdout.strip()
     old = u['checks']
-    if not (old and old['sha'] == final and (old.get('configured') or old.get('waived')) and (old['ok'] is not None or old.get('waived'))):
-        apply_checks(t, uid, final)   # результат пишет хост; блокер окружения — отказ до перемещения ветки
-    chk = u['checks']
-    if not (chk['ok'] or chk.get('waived')):
-        u['checks'] = old   # свидетельство по кандидату остаётся; красный итоговый результат — в сообщении
+    u['merged'] = final   # намерение сохраняется до проверок и до перемещения ветки: обрыв на любом шаге не оставляет проверки без отметки
+    t.save()
+    try:
+        if not (old and old['sha'] == final and (old.get('configured') or old.get('waived')) and (old['ok'] is not None or old.get('waived'))):
+            apply_checks(t, uid, final)   # результат пишет хост; блокер окружения — отказ до перемещения ветки
+        chk = u['checks']
+        if not (chk['ok'] or chk.get('waived')):
+            need(chk['ok'] is not False, f'проверки итогового SHA {final[:10]} (ветка задачи + кандидат) НЕ прошли — ветка не изменена:\n{chk["tail"]}')
+            need(False, f'проверки итогового SHA {final[:10]} не подтверждены: {chk.get("blocker") or "нет результата"}')
+    except Blocked:
+        u['merged'] = None
+        if u['checks'] is not old and (u['checks'] or {}).get('sha') == final:
+            u['checks'] = old   # свидетельство по кандидату остаётся; итоговый результат — в сообщении
         t.save()
-        need(chk['ok'] is not False, f'проверки итогового SHA {final[:10]} (ветка задачи + кандидат) НЕ прошли — ветка не изменена:\n{chk["tail"]}')
-        need(False, f'проверки итогового SHA {final[:10]} не подтверждены: {chk.get("blocker") or "нет результата"}')
+        raise
     return final
 
 
@@ -2113,11 +2117,16 @@ def cmd_finish(a):
     return 0 if ok else 1
 
 
-def state_units(root):
-    """Единицы активной задачи без блокировок и проверок (для выбора блокировок); нет задачи или файл не читается — пусто."""
+def state_units(root, strict=False):
+    """Единицы активной задачи без проверок (для выбора блокировок). Нет задачи — пусто; нечитаемое состояние — пусто, а при strict
+    (finish) отказ: закрытие не должно идти без блокировок единиц из-за случайного сбоя чтения."""
+    path = Path(root) / '.ai/task/state.json'
+    if strict and not path.exists():
+        return []
     try:
-        return [u for u in rjson_retry(Path(root) / '.ai/task/state.json')['units'] if UNIT_RE.fullmatch(u)]
+        return [u for u in rjson_retry(path)['units'] if UNIT_RE.fullmatch(u)]
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        need(not strict, 'состояние задачи не читается: блокировки единиц не определены, finish отказан — повтори')
         return []
 
 
@@ -2183,7 +2192,7 @@ def main(argv=None):
         if a.cmd == 'finish':   # закрытие задачи — только когда не работает ни одна единица
             with contextlib.ExitStack() as st:
                 st.enter_context(Lock(root))
-                for uid in state_units(root):
+                for uid in state_units(root, strict=True):
                     st.enter_context(Lock(root, f'unit-{uid}'))
                 return cmd_finish(a)
         uid = getattr(a, 'uid', None)

@@ -1852,6 +1852,15 @@ def t_parallel():
     check('parallel: обрыв integrate после перемещения ветки — повтор дозаписывает статус без новых проверок и вызовов',
           rc == 0 and 'дозаписано' in out and rstate(r)['units']['fe']['status'] == 'integrated' and r.git('rev-parse', 'HEAD') == merged_sha
           and len(docker_runs(r)) == runs, out + err)
+    r.git('reset', '--hard', r.git('rev-parse', 'HEAD^1'))   # обрыв между записью проверок на SHA слияния и записью намерения: ветка не двигалась
+    state_edit(r, lambda st: st['units']['fe'].update(status='accepted', merged=None))
+    rc, out, err = r.cr('integrate', 'fe')
+    check('parallel: обрыв до перемещения ветки — повтор строит то же слияние, берёт записанные проверки и вливает без новых запусков',
+          rc == 0 and r.git('rev-parse', 'HEAD') == merged_sha and len(docker_runs(r)) == runs and rstate(r)['units']['fe']['merged'] == merged_sha, out + err)
+    (r.repo / '.ai/task/state.json.bak').write_text((r.repo / '.ai/task/state.json').read_text(encoding='utf-8'), encoding='utf-8')
+    (r.repo / '.ai/task/state.json').write_text('{"units": ', encoding='utf-8')
+    rc, _, err = r.cr('finish')
+    check('parallel: finish при нечитаемом состоянии отказан до закрытия (без блокировок единиц не работает)', rc == 2, err)
 
     # --- В. две интеграции одновременно выстраиваются последовательно
     q = Proj('par-int', extra={'frontend/src/B.tsx': APP_OLD})
