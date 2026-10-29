@@ -1852,6 +1852,17 @@ def t_parallel():
     check('parallel: обрыв integrate после перемещения ветки — повтор дозаписывает статус без новых проверок и вызовов',
           rc == 0 and 'дозаписано' in out and rstate(r)['units']['fe']['status'] == 'integrated' and r.git('rev-parse', 'HEAD') == merged_sha
           and len(docker_runs(r)) == runs, out + err)
+    # жёсткий обрыв после записи красных проверок на SHA слияния (откат в except не выполнен) — исправление backend и повтор должны проходить
+    r.git('reset', '--hard', r.git('rev-parse', 'HEAD^1'))
+    st_ok = rstate(r)['units']['fe']['checks']
+    state_edit(r, lambda st: st['units']['fe'].update(status='accepted', merged=merged_sha, checks={**st_ok, 'ok': False, 'tail': 'FAILED', 'commands': []}))
+    rc, out, err = r.cr('integrate', 'fe')
+    check('parallel: красные проверки на SHA слияния после обрыва не блокируют повтор: тот же SHA — отказ по результату, без перезапуска',
+          rc == 2 and 'НЕ прошли' in err and r.git('rev-parse', 'HEAD') == r.git('rev-parse', 'HEAD') and len(docker_runs(r)) == runs, out + err)
+    state_edit(r, lambda st: st['units']['fe'].update(checks={**st_ok, 'sha': 'f' * 40, 'ok': False, 'tail': 'FAILED', 'commands': []}))
+    rc, out, err = r.cr('integrate', 'fe')
+    check('parallel: красные проверки чужого SHA не мешают — слияние перепроверяется и вливается', rc == 0 and r.git('rev-parse', 'HEAD') == merged_sha, out + err)
+    runs = len(docker_runs(r))
     r.git('reset', '--hard', r.git('rev-parse', 'HEAD^1'))   # обрыв между записью проверок на SHA слияния и записью намерения: ветка не двигалась
     state_edit(r, lambda st: st['units']['fe'].update(status='accepted', merged=None))
     rc, out, err = r.cr('integrate', 'fe')

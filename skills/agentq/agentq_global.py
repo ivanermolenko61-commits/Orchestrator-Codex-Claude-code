@@ -1890,7 +1890,7 @@ def cmd_integrate(a):
     cand, v = u['candidate'], u['verdict']
     need(cand and v and v['sha'] == cand and v['value'] == 'PASS' and not u['unmet'],
          'интеграция только после PASS независимого ревью на точном SHA кандидата')
-    need(not (u['checks'] and u['checks']['ok'] is False), 'проверки кандидата красные')
+    need(not (u['checks'] and u['checks']['ok'] is False and u['checks']['sha'] == cand), 'проверки кандидата красные')   # красные на SHA слияния решает merge_commit
     with Lock(root, 'integrate', wait=1800):   # интеграция последовательна: следующая видит ветку после предыдущей
         t.sync()
         need(git(root, 'branch', '--show-current') == t.s['branch'], 'ветка задачи изменилась')
