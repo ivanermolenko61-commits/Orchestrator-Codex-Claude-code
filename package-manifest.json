@@ -69,8 +69,8 @@
       "git_blob": "60d1b412a46d37040649119db4d24ee0f3bf76d9"
     },
     "README.md": {
-      "sha256": "e414ceac5b28db4b5e8475602c1df7f0ac38079f7b1ef7768e229d72d27543bc",
-      "git_blob": "f4ad27a40ff392830d9a446a3000717a9446ca37"
+      "sha256": "c28ba7ade37848c991efddf4a039e8462a9148a176eedea482f407389c0c2a2c",
+      "git_blob": "2255e9304fd5299e7262d0c54d386d311d8ec2fc"
     },
     "scripts/install-global.sh": {
       "sha256": "b66806667f561d4ceda10d6fe017bf767bc217c2da46c62d4a6978473046cb6b",
