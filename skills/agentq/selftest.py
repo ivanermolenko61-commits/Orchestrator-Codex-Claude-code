@@ -2681,6 +2681,10 @@ def t_acceptance_regressions():
         if drop_archive:
             for d in (r11.repo / '.ai/done').glob('*'):
                 shutil.rmtree(d)
+        else:   # архив другой задачи с id-суффиксом (hotfix-<id>), более ранний по имени: чужая история не подменяет свою
+            decoy = r11.repo / '.ai/done' / f'20200101-000000-hotfix-{tag}'
+            decoy.mkdir()
+            (decoy / 'state.json').write_text(json.dumps({'id': f'hotfix-{tag}', 'units': {'main': {'rounds': []}}}), encoding='utf-8')
         r11.cr('start', 'прежний журнал и красные проверки', '--id', tag + 'b', '--kind', 'backend', '--continues', tag)
         carried11 = rstate(r11)['units']['main']['credited']
         r11.git('reset', '--hard', sha_b)

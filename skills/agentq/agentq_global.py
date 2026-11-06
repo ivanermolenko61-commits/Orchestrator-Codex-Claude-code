@@ -680,11 +680,14 @@ def same_work(kind, files, m):
 def legacy_credited(root, entry, uid, verdict):
     """Зачтённые SHA единицы из записи журнала прежней версии (списка credited в ней нет): по кругам архивного состояния задачи. Если архива
     нет, восстановить историю нельзя — осторожно считаем зачтённым кандидата последнего вердикта (повторного зачёта он не получит)."""
-    for d in sorted((Path(root) / '.ai/done').glob(f'*-{entry["id"]}')):
+    for d in sorted((Path(root) / '.ai/done').glob('*-*')):   # каталог <время>-<id>; суффикс чужого id (hotfix-api для api) не подходит — сверяется id самого состояния
         try:
-            su = json.loads((d / 'state.json').read_text(encoding='utf-8'))['units'][uid]
+            st = json.loads((d / 'state.json').read_text(encoding='utf-8'))
+            if st.get('id') != entry['id']:
+                continue
+            su = st['units'][uid]
             return {r['sha'] for r in su.get('rounds') or [] if r.get('progress') is True} | set(su.get('credited') or [])
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             continue
     warn(f'{uid}: в записи {entry["id"]} прежней версии нет списка зачтённых SHA, архив состояния недоступен — история прогресса восстановлена '
          'неполно: зачтённым считается кандидат последнего вердикта')
