@@ -1290,6 +1290,11 @@ NOTE_T = 'упростить: убрать вложенные ветки и пр
 
 
 def rstate(x):
+    for _ in range(100):   # Windows: файл в момент атомарной замены процессом движка недоступен для чтения (как и rjson_retry в движке)
+        try:
+            return json.loads((x.repo / '.ai/task/state.json').read_text(encoding='utf-8'))
+        except PermissionError:
+            time.sleep(0.05)
     return json.loads((x.repo / '.ai/task/state.json').read_text(encoding='utf-8'))
 
 
