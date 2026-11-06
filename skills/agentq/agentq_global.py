@@ -488,6 +488,7 @@ def normalize_state(s):
                      ('rounds', []), ('rethinks', []), ('open_checks', False), ('merged', None),
                      ('findings', {}), ('finding_seq', 0), ('findings_imported', None)):   # реестр замечаний (1.3.0); у старых состояний пуст
             u.setdefault(k, v)
+        u.setdefault('credited', [r['sha'] for r in u['rounds'] if r.get('progress') is True])   # SHA, за которые прогресс уже засчитан
         u.setdefault('open_review', (u.get('verdict') or {}).get('value') not in (None, 'PASS'))
         u.setdefault('review_applied', (u.get('verdict') or {}).get('n', 0))
         u.setdefault('author_applied', max([c['n'] for c in s['calls'].values()
@@ -636,6 +637,8 @@ def check_ledger(entries):
                     or not all(isinstance(m.get(k) or '', str) for k in ('base', 'last_report')) \
                     or not is_int(m.get('stall', 0)) or not isinstance(m.get('rethinks', []), list):
                 bad(f'{name}: описание единицы {uid} не разобрано')
+            if not isinstance(m.get('credited', []), list) or not all(isinstance(x, str) for x in m.get('credited', [])):
+                bad(f'{name}: список зачтённых SHA единицы {uid} не разобран')
             fs = m.get('findings', {})
             if not isinstance(fs, dict) or not is_int(m.get('finding_seq', 0)) or not all(
                     FID_RE.fullmatch(k) and isinstance(v, dict) and v.get('status') in ('open', 'closed', 'withdrawn')
@@ -709,6 +712,7 @@ def carry_unit(task, uid, u):
     u['stall'], u['progress'], u['rethinks'] = m.get('stall', 0), m.get('progress'), list(m.get('rethinks') or [])
     u['open_checks'] = bool(m.get('open_checks'))
     u['findings'], u['finding_seq'] = copy.deepcopy(m.get('findings') or {}), m.get('finding_seq', 0)   # ID и статусы переходят вместе с расходом
+    u['credited'] = list(m.get('credited') or [])   # зачтённые SHA переходят по цепочке: прогресс одного кандидата не начисляется заново
     u['findings_imported'] = m.get('findings_imported')   # запись без реестра (прежняя версия): импорт из отчёта при первом вызове, см. ensure_registry
     mine = verdicts.get(uid) or {}
     u['open_review'] = mine.get('value') not in (None, 'PASS')
@@ -798,10 +802,14 @@ def stall_message(task, uid):
 def record_round(task, uid, sha_, progress, why):
     """Итог круга по существу: прогресс — закрытые конкретные замечания или исправленные проверки; счётчик кругов без прогресса подряд."""
     u = task.unit(uid)
+    if progress and sha_ in u['credited']:   # один SHA — один зачёт прогресса (включая возврат на прежний SHA и продолжение --continues)
+        progress, why = False, why + '; прогресс этого SHA уже засчитан'
     stopped = u['stall'] >= STALL_STOP or (u['rethinks'] and u['progress'] is False)
     u['rounds'].append({'sha': sha_, 'progress': progress, 'why': why, 'at': time.time(), **({'stopped': True} if stopped else {})})
     if stopped:
         return False   # остановку после двух кругов без прогресса или после пересмотра снимает только тимлид (rethink)
+    if progress:
+        u['credited'].append(sha_)
     u['progress'] = progress
     u['stall'] = 0 if progress else u['stall'] + 1
     return True
@@ -1601,7 +1609,7 @@ def new_unit(kind, files, context, after, base, spec):
             'branch': None, 'pins': {}, 'candidate': None, 'author_applied': 0, 'review_applied': 0, 'unmet': [], 'checks': None, 'verdict': None,
             'reviewed': None, 'last_report': None, 'carried_report': None, 'review_base': None, 'carried_exclude': [], 'stall': 0,
             'progress': None, 'rounds': [], 'rethinks': [], 'open_checks': False, 'open_review': False, 'merged': None,
-            'findings': {}, 'finding_seq': 0, 'findings_imported': None}
+            'findings': {}, 'finding_seq': 0, 'findings_imported': None, 'credited': []}
 
 
 def cmd_start(a):
@@ -1655,7 +1663,7 @@ def cmd_start(a):
                         # описание единицы: основание diff и отчёт; база — самая ранняя; запись прежней версии — по базе задачи (род неизвестен)
                         cur = inh['meta'].setdefault(uid, dict(m))
                         cur.update({k: m[k] for k in ('kind', 'files', 'last_report') if m.get(k)})
-                        cur.update({k: m[k] for k in ('stall', 'progress', 'rethinks', 'open_checks', 'findings', 'finding_seq', 'findings_imported')
+                        cur.update({k: m[k] for k in ('stall', 'progress', 'rethinks', 'open_checks', 'findings', 'finding_seq', 'findings_imported', 'credited')
                                     if k in m})   # история прогресса и реестр замечаний — последние (реестр более поздней задачи включает прежний)
                     for uid, vd in (e.get('verdicts') or {}).items():   # последний вердикт: открытые замечания и принятые файлы
                         inh['verdicts'][uid] = vd
@@ -2365,9 +2373,8 @@ def do_review(task, uid, effort, full):
         if mergeable:
             last['why'] += f'; ревью {value}, закрыто прежних замечаний: {closed}{detail}'   # круг этого кандидата уже засчитан по проверкам
         else:
-            credited = any(r['sha'] == tip and r['progress'] for r in u['rounds'])   # прогресс этого SHA уже засчитан (проверки или закрытые ID)
             repeat = any(r['sha'] == tip for r in u['rounds'])   # тот же SHA уже оценён: PASS без новых закрытых ID прогресса не добавляет
-            record_round(task, uid, tip, not credited and (closed > 0 or (value == 'PASS' and not repeat and not any(x['status'] == 'withdrawn' for x in u['findings'].values()))),
+            record_round(task, uid, tip, closed > 0 or (value == 'PASS' and not repeat and not any(x['status'] == 'withdrawn' for x in u['findings'].values())),
                          f'ревью {value}, закрыто прежних замечаний: {closed}{detail}')
         note = (f'\nПрогресс круга: закрыто прежних замечаний {closed}{detail}' if u['progress'] else
                 f'\nКРУГ БЕЗ ПРОГРЕССА ({u["stall"]} подряд): прежние замечания не закрыты')
@@ -2658,7 +2665,8 @@ def cmd_finish(a):
                     'unit_meta': {k: {'kind': u['kind'], 'files': u['files'], 'base': u['review_base'] or u['base'],
                                       'last_report': u['last_report'] or u['carried_report'], 'stall': u['stall'],
                                       'progress': u['progress'], 'rethinks': u['rethinks'], 'open_checks': u['open_checks'],
-                                      'findings': u['findings'], 'finding_seq': u['finding_seq'], 'findings_imported': u['findings_imported']}
+                                      'findings': u['findings'], 'finding_seq': u['finding_seq'], 'findings_imported': u['findings_imported'],
+                                      'credited': u['credited']}
                                   for k, u in t.s['units'].items()}})
     wjson(Path(root) / '.ai/ledger.json', entries)
     dest = Path(root) / '.ai/done' / f'{time.strftime("%Y%m%d-%H%M%S")}-{t.s["id"]}'

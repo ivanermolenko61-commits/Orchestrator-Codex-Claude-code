@@ -2610,6 +2610,41 @@ def t_acceptance_regressions():
     check('приёмка: закрытие разных ID повторными ревью одного SHA засчитывается как один круг прогресса (затем PASS)',
           rc_a == 1 and rc_b == 0 and fids(r7) == {'F1': 'closed', 'F2': 'closed'} and [r['progress'] for r in u['rounds']] == [True, False], (rc_a, rc_b, u['rounds']))
 
+    # --- один SHA — один зачёт прогресса: возврат на прежний кандидат и продолжение цепочки
+    r8 = Proj('acc-r8')
+    r8.cr('start', 'возврат на SHA', '--id', 'acc-r8', '--kind', 'backend')
+    r8.script('codex', [FIX_T] + [{'text': 'VERDICT: PASS'}] * 8)
+    review_n(r8, 1)
+    r8.commit('backend/app.py', 'def add(a, b):\n    return a + b  # FAIL_test X\n')
+    r8.cr('review')
+    r8.commit('backend/app.py', 'def add(a, b):\n    return a + b  # B\n')
+    r8.cr('review')
+    sha_b = r8.git('rev-parse', 'HEAD')
+    r8.commit('backend/app.py', 'def add(a, b):\n    return a + b  # FAIL_test C\n')
+    r8.cr('review')
+    r8.git('reset', '--hard', sha_b)
+    r8.cr('review')
+    r8.cr('review')
+    rounds_b = [r['progress'] for r in rstate(r8)['units']['main']['rounds'] if r['sha'] == sha_b]
+    check('приёмка: возврат на уже зачтённый SHA после красных проверок другого кандидата прогресса не добавляет (один зачёт на SHA)',
+          rounds_b.count(True) == 1 and len(rounds_b) >= 2, rounds_b)
+
+    r9 = Proj('acc-r9')
+    r9.cr('start', 'прогресс и продолжение', '--id', 'acc-r9', '--kind', 'backend')
+    r9.script('codex', [{'text': '- [MAJOR] [НОВОЕ] backend/app.py:2 — A.\n- [MAJOR] [НОВОЕ] backend/app.py:3 — B.\nVERDICT: FIX'},
+                        {'text': '[ЗАКРЫТО F1] исправлено\nVERDICT: PASS'}, {'text': '[ЗАКРЫТО F2] исправлено\nVERDICT: PASS'}])
+    review_n(r9, 1)
+    review_n(r9, 2)
+    r9.cr('finish', '--abandon')
+    cred = rledger(r9)[-1]['unit_meta']['main']['credited']
+    r9.cr('start', 'прогресс и продолжение', '--id', 'acc-r9b', '--kind', 'backend', '--continues', 'acc-r9')
+    carried = rstate(r9)['units']['main']['credited']
+    rc, _, _ = r9.cr('review')
+    u = rstate(r9)['units']['main']
+    check('приёмка: зачтённые SHA переходят по --continues: закрытие остального ID на том же SHA — PASS, но без повторного зачёта прогресса',
+          rc == 0 and len(cred) == 1 and carried == cred and fids(r9) == {'F1': 'closed', 'F2': 'closed'} and u['rounds'][-1]['progress'] is False
+          and 'уже засчитан' in u['rounds'][-1]['why'], (rc, cred, carried, u['rounds']))
+
     # --- влитый frontend: изменение контекста после интеграции не даёт молчаливой приёмки
     f = Proj('acc-fe', extra={'docs/api.md': 'API v1\n'})
     f.cr('start', 'контекст после интеграции', '--id', 'acc-fe', '--kind', 'mixed', '--contract-file', f.contract())
