@@ -727,11 +727,13 @@ def carry_unit(task, uid, u):
     if mine.get('value') == 'PASS':   # принятый и с тех пор не менявшийся результат остаётся принятым: ревью модели не повторяется (проверки — CR checks без модели)
         spec = u['files'] or ['.', *[f':(exclude){f}' for f in other_owned(task, uid) + u['carried_exclude'] + [f for k, o in meta.items() if k != uid for f in o.get('files') or []]]]
         # файлы других прежних единиц ещё могут быть созданы заново; если нет, finish перепроверит область и потребует ревью
-        req = mine.get('requirements')   # редакция требований и состав контекста, для которых получен PASS (вердикт прежней версии — без записи)
-        same_req = not req or (req.get('contract_sha256') == sha(task.s['contract']) and req.get('spec_sha256') == sha(u['spec'])
-                               and sorted(e['path'] for e in mine.get('context') or []) == sorted(u['context']))
-        if not same_req:
-            warn(f'{uid}: контракт, спецификация или состав контекста изменились — прежний PASS не переносится, нужно новое ревью')
+        req = mine.get('requirements')   # цель, контракт, спецификация и состав контекста, для которых получен PASS
+        same_req = bool(req) and (req.get('goal_sha256') == task.s['goal_sha'] and req.get('contract_sha256') == sha(task.s['contract'])
+                                  and req.get('spec_sha256') == sha(u['spec'])
+                                  and sorted(e['path'] for e in mine.get('context') or []) == sorted(u['context']))
+        if not same_req:   # запись требований отсутствует (вердикт прежней версии) — совместимость не доказана, как и при их изменении
+            warn(f'{uid}: цель, контракт, спецификация или состав контекста изменились либо не записаны для прежнего PASS — он не переносится, '
+                 'нужно новое ревью')
         if same_req and git(root, 'merge-base', '--is-ancestor', mine['sha'], 'HEAD', check=False).returncode == 0 \
                 and git(root, 'diff', '--no-ext-diff', '--quiet', mine['sha'], 'HEAD', '--', *spec, check=False).returncode == 0:
             u['verdict'], u['reviewed'], u['status'] = {'sha': mine['sha'], 'value': 'PASS', 'n': 0,
@@ -1052,7 +1054,8 @@ def requirements_line(task, uid):
 def context_meta(task, uid, entries):
     """Что именно видел участник: путь и sha256 каждого файла контекста и редакция требований; сохраняется в записи вызова."""
     return {'context': [{'path': e['path'], 'sha256': e['sha256']} for e in entries],
-            'requirements': {'contract_sha256': sha(task.s['contract']), 'spec_sha256': sha(task.unit(uid)['spec'])}}
+            'requirements': {'goal_sha256': task.s['goal_sha'], 'contract_sha256': sha(task.s['contract']),
+                             'spec_sha256': sha(task.unit(uid)['spec'])}}
 
 
 def context_drift(task, uid, ref):
@@ -1229,12 +1232,17 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
         return saved.read_bytes().decode('utf-8')   # байты как записаны: CRLF файлов (autocrlf) не должен давать «другой запрос»
 
     stamp = (lambda x: {**x, 'subject': subject}) if subject is not None else (lambda x: x)
+
+    def intact(text):   # сохранённый запрос не изменён после резерва (хэш из записи вызова; у записей без хэша сверки нет)
+        want = (task.s['calls'].get(key) or {}).get('prompt_sha256')
+        return want is None or want == sha(text)
     if rec.exists():
         r = rjson(rec)
         if subject is not None and r.get('subject') is not None:
             need(r['subject'] == subject, f'{key}: сохранённый ответ относится к другому снимку ({r["subject"]}) — вызов не повторяется')
-            need(saved.exists() and r['binding'] == sha(kind + '\0' + saved_text()), f'{key}: сохранённый запрос не соответствует receipt — вызов не повторяется')
-        elif legacy_ok is not None and saved.exists() and r['binding'] == sha(kind + '\0' + saved_text()) and legacy_ok(saved_text()):
+            need(saved.exists() and r['binding'] == sha(kind + '\0' + saved_text()) and intact(saved_text()),
+                 f'{key}: сохранённый запрос не соответствует receipt или записи резерва — вызов не повторяется')
+        elif legacy_ok is not None and saved.exists() and r['binding'] == sha(kind + '\0' + saved_text()) and intact(saved_text()) and legacy_ok(saved_text()):
             pass   # receipt прежней версии: точный сохранённый запрос относится к тому же снимку — результат читается без нового вызова
         else:
             need(r['binding'] == sha(kind + '\0' + build()[0]), f'{key}: запрос изменился после сохранённого ответа (binding mismatch) — вызов не повторяется')
@@ -1245,7 +1253,8 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
         if subject is not None and c.get('subject') is not None:
             need(c['subject'] == subject and saved.exists(), f'{key}: прерванный/неопределённый вызов относится к другому снимку — повтор запрещён, см. {d}')
             text = saved_text()
-        elif legacy_ok is not None and saved.exists() and legacy_ok(saved_text()):
+            need(intact(text), f'{key}: сохранённый запрос не соответствует записи резерва (изменён после резерва) — повтор запрещён, см. {d}')
+        elif legacy_ok is not None and saved.exists() and intact(saved_text()) and legacy_ok(saved_text()):
             text = saved_text()   # вызов прежней версии: сохранённый запрос относится к тому же снимку
         else:
             text = build()[0]
@@ -2344,7 +2353,8 @@ def do_review(task, uid, effort, full):
         if last.get('sha') == tip and last.get('progress') and 'исправлены падавшие проверки' in last.get('why', '') and u['progress'] is True:
             last['why'] += f'; ревью {value}, закрыто прежних замечаний: {closed}{detail}'   # круг этого кандидата уже засчитан по проверкам
         else:
-            record_round(task, uid, tip, closed > 0 or (value == 'PASS' and not ap['withdrawn']), f'ревью {value}, закрыто прежних замечаний: {closed}{detail}')
+            record_round(task, uid, tip, closed > 0 or (value == 'PASS' and not any(x['status'] == 'withdrawn' for x in u['findings'].values())),
+                         f'ревью {value}, закрыто прежних замечаний: {closed}{detail}')
         note = (f'\nПрогресс круга: закрыто прежних замечаний {closed}{detail}' if u['progress'] else
                 f'\nКРУГ БЕЗ ПРОГРЕССА ({u["stall"]} подряд): прежние замечания не закрыты')
     u['open_review'] = value != 'PASS'

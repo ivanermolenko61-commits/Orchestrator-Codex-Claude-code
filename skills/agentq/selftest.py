@@ -2496,7 +2496,7 @@ def t_acceptance_regressions():
           rc == 0 and fids(j) == {'F1': 'withdrawn'} and u['rounds'][-1]['progress'] is False and u['stall'] == 1, u['rounds'])
 
     # --- --continues не переносит PASS на другие требования или состав контекста
-    def prior_pass(label, same):
+    def prior_pass(label, same, goal2='перенос PASS', strip_req=False):
         x = Proj(label, extra={'backend/b.py': 'B = 1\n', 'docs/api.md': 'API\n'})
         spec1, spec2 = x.root / 's1.txt', x.root / 's2.txt'
         spec1.write_text('требование 1', encoding='utf-8')
@@ -2508,7 +2508,12 @@ def t_acceptance_regressions():
         x.commit('backend/app.py', BODY_T.format(n=1))
         rc, _, _ = x.cr('review', 'u1')
         x.cr('finish', '--abandon')
-        x.cr('start', 'перенос PASS', '--id', label + '-2', '--kind', 'mixed', '--contract-file', x.contract(), '--continues', label + '-1')
+        if strip_req:   # вердикт прежней версии: записи требований нет
+            led = rledger(x)
+            for vd in led[-1]['verdicts'].values():
+                vd.pop('requirements', None)
+            (x.repo / '.ai/ledger.json').write_text(json.dumps(led), encoding='utf-8')
+        x.cr('start', goal2, '--id', label + '-2', '--kind', 'mixed', '--contract-file', x.contract(), '--continues', label + '-1')
         args = ['--spec-file', spec1 if same else spec2, '--context', 'docs/api.md']
         rc2, _, err = x.cr('unit', 'u1', '--kind', 'backend', '--files', 'backend/app.py', *args)
         return rc, rc2, err, rstate(x)['units']['u1']
@@ -2517,7 +2522,41 @@ def t_acceptance_regressions():
           rc == 0 and rc2 == 0 and u1['status'] == 'accepted' and u1['verdict'] and u1['verdict'].get('requirements'), (err, u1['status']))
     rc, rc2, err, u1 = prior_pass('acc-rb', False)
     check('приёмка: изменённая спецификация при --continues — прежний PASS не переносится, единица требует нового ревью',
-          rc == 0 and rc2 == 0 and u1['status'] != 'accepted' and not u1['verdict'] and 'прежний PASS не переносится' in err, (err, u1['status']))
+          rc == 0 and rc2 == 0 and u1['status'] != 'accepted' and not u1['verdict'] and 'не переносится' in err, (err, u1['status']))
+
+    rc, rc2, err, u1 = prior_pass('acc-rc', True, goal2='перенос PASS: уточнённая цель')
+    check('приёмка: изменённая цель задачи при --continues — прежний PASS не переносится', rc == 0 and rc2 == 0 and u1['status'] != 'accepted' and not u1['verdict'], (err, u1['status']))
+    rc, rc2, err, u1 = prior_pass('acc-rd', True, strip_req=True)
+    check('приёмка: PASS без записи требований (прежняя версия) совместимость не доказывает — не переносится, нужно новое ревью',
+          rc == 0 and rc2 == 0 and u1['status'] != 'accepted' and not u1['verdict'] and 'не переносится' in err, (err, u1['status']))
+
+    # --- снятие, затем спорный отчёт, затем чистый PASS того же SHA — прогресса нет
+    k = Proj('acc-k')
+    k.cr('start', 'снятие и повтор', '--id', 'acc-k', '--kind', 'backend')
+    k.script('codex', [FIX_T,
+                       {'text': '[СНЯТО F1] замечание ошибочно: требование не относится к этой задаче\n[ОСТАЛОСЬ F99] а\n[ОСТАЛОСЬ F99] б\nVERDICT: PASS'},
+                       {'text': 'VERDICT: PASS'}])
+    review_n(k, 1)
+    rc1, _, _ = review_n(k, 2)
+    rc2, out, _ = k.cr('review')
+    u = rstate(k)['units']['main']
+    check('приёмка: снятие + спорный отчёт + чистый PASS того же SHA — PASS принят, но ни один круг не засчитан как прогресс (исправлений нет)',
+          rc1 == 1 and rc2 == 0 and fids(k) == {'F1': 'withdrawn'} and [r['progress'] for r in u['rounds']] == [False, False] and u['stall'] == 2, (u['rounds'], out))
+
+    # --- повреждённый сохранённый запрос не принимается при восстановлении
+    c = Proj('acc-c')
+    c.cr('start', 'целостность запроса', '--id', 'acc-c', '--kind', 'backend')
+    c.script('codex', [{'text': 'VERDICT: PASS'}])
+    c.commit('backend/app.py', BODY_T.format(n=1))
+    c.cr('review')
+    d = c.repo / '.ai/task/calls/main-review-1'
+    (d / 'receipt.json').unlink()
+    text = (d / 'prompt.txt').read_text(encoding='utf-8')
+    (d / 'prompt.txt').write_text(text.replace('Раунд ревью: 1', 'Раунд ревью: 1 (подмена)'), encoding='utf-8', newline='')
+    state_edit(c, lambda st: st['units']['main'].update(verdict=None, reviewed=None, review_applied=0, status='open', open_review=False, last_report=None))
+    rc, _, err = c.cr('review')
+    check('приёмка: запрос изменён после резерва — восстановление остановлено, receipt не создан, вызова нет',
+          rc == 2 and 'записи резерва' in err and not (d / 'receipt.json').exists() and c.count('codex-review') == 1, err)
 
     # --- влитый frontend: изменение контекста после интеграции не даёт молчаливой приёмки
     f = Proj('acc-fe', extra={'docs/api.md': 'API v1\n'})
@@ -2553,6 +2592,7 @@ def t_acceptance_regressions():
         def old(st):
             st['calls']['main:review:1'].pop('subject', None)
             st['calls']['main:review:1'].pop('context', None)
+            st['calls']['main:review:1']['prompt_sha256'] = hashlib.sha256(old_text.encode('utf-8')).hexdigest()
             st['units']['main'].update(verdict=None, reviewed=None, review_applied=0, status='open', open_review=False, last_report=None)
         state_edit(x, old)
         rc2, out, err = x.cr('review')
