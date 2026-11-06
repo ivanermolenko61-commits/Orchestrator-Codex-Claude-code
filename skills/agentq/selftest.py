@@ -2484,7 +2484,9 @@ def t_acceptance_regressions():
     check('приёмка: дубликат ссылки «ОСТАЛОСЬ» на неизвестный ID — отчёт спорный, PASS не принят; явное закрытие F1 засчитано',
           rc == 1 and u['verdict']['value'] == 'UNCERTAIN' and u['verdict'].get('integrity') and 'F99: упомянут 2 раза' in out and fids(i) == {'F1': 'closed'}, out)
     rc, out, _ = i.cr('review')
-    check('приёмка: после устранения спорных меток тот же SHA получает PASS', rc == 0, out)
+    u = rstate(i)['units']['main']
+    check('приёмка: после устранения спорных меток тот же SHA получает PASS, но прогресс засчитан один раз (за закрытый F1), повторный PASS его не добавляет',
+          rc == 0 and [r['progress'] for r in u['rounds']] == [False, True, False] and u['stall'] == 1, (out, u['rounds']))
 
     j = Proj('acc-j')
     j.cr('start', 'снятие и PASS', '--id', 'acc-j', '--kind', 'backend')
@@ -2601,6 +2603,31 @@ def t_acceptance_regressions():
     check('приёмка: receipt прежней версии (без subject) читается по сохранённому запросу — нового вызова нет', rc == 0 and rc2 == 0 and n == 1, msg)
     rc, rc2, n, msg = legacy('acc-lw', True)
     check('приёмка: вызов прежней версии с готовым ответом, но без receipt, восстанавливается без нового вызова', rc == 0 and rc2 == 0 and n == 1, msg)
+
+    # --- запрос, изменённый после резерва, не принимается и без subject (прямой вызов)
+    eng = load_engine()
+    tp = Proj('acc-t')
+    tp.cr('start', 'целостность прямого вызова', '--id', 'acc-t', '--kind', 'backend')
+    os.chdir(tp.repo)
+    tk = eng.Task(tp.repo).load()
+
+    def crash(d, prompt):
+        (d / 'raw.txt').write_text('VERDICT: PASS', encoding='utf-8')
+        raise RuntimeError('процесс умер после сохранения ответа')
+    try:
+        eng.model_call(tk, 'main', 'review', 1, 'codex-review', 'PROMPT-A', crash, eng.parse_codex_review)
+    except RuntimeError:
+        pass
+    dd = tk.dir / 'calls/main-review-1'
+    (dd / 'prompt.txt').write_text('PROMPT-B', encoding='utf-8', newline='')   # повреждённый сохранённый запрос совпал с заново построенным
+    tk = eng.Task(tp.repo).load()
+    try:
+        eng.model_call(tk, 'main', 'review', 1, 'codex-review', 'PROMPT-B', lambda d, pr: None, eng.parse_codex_review)
+        ok = False
+    except eng.Blocked as e:
+        ok = 'записи резерва' in str(e)
+    check('приёмка: запрос изменён после резерва и совпадает с заново построенным — восстановление всё равно остановлено, receipt не создан',
+          ok and not (dd / 'receipt.json').exists())
 
     # --- прерванное ожидание зависимости попадает в метрики
     w = Proj('acc-wait')

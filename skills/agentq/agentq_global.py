@@ -1236,7 +1236,12 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
     def intact(text):   # сохранённый запрос не изменён после резерва (хэш из записи вызова; у записей без хэша сверки нет)
         want = (task.s['calls'].get(key) or {}).get('prompt_sha256')
         return want is None or want == sha(text)
+
+    def guard():   # изменённый после резерва запрос не принимается ни одной веткой восстановления
+        if saved.exists():
+            need(intact(saved_text()), f'{key}: сохранённый запрос не соответствует записи резерва (изменён после резерва) — повтор запрещён, см. {d}')
     if rec.exists():
+        guard()
         r = rjson(rec)
         if subject is not None and r.get('subject') is not None:
             need(r['subject'] == subject, f'{key}: сохранённый ответ относится к другому снимку ({r["subject"]}) — вызов не повторяется')
@@ -1249,6 +1254,7 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
         tlog(task, uid, ev='recovered', stage=role, id=key, source='receipt')
         return r['result']
     if key in task.s['calls']:
+        guard()
         c = task.s['calls'][key]
         if subject is not None and c.get('subject') is not None:
             need(c['subject'] == subject and saved.exists(), f'{key}: прерванный/неопределённый вызов относится к другому снимку — повтор запрещён, см. {d}')
@@ -2350,10 +2356,11 @@ def do_review(task, uid, effort, full):
         closed = len(ap['closed'])
         detail = (f' ({", ".join(ap["closed"])})' if closed else '') + (f'; снято как ошибочное (не прогресс): {", ".join(ap["withdrawn"])}' if ap['withdrawn'] else '')
         last = u['rounds'][-1] if u['rounds'] else {}
+        repeat = any(r['sha'] == tip for r in u['rounds'])   # тот же SHA уже оценён: PASS без новых закрытых ID прогресса не добавляет
         if last.get('sha') == tip and last.get('progress') and 'исправлены падавшие проверки' in last.get('why', '') and u['progress'] is True:
             last['why'] += f'; ревью {value}, закрыто прежних замечаний: {closed}{detail}'   # круг этого кандидата уже засчитан по проверкам
         else:
-            record_round(task, uid, tip, closed > 0 or (value == 'PASS' and not any(x['status'] == 'withdrawn' for x in u['findings'].values())),
+            record_round(task, uid, tip, closed > 0 or (value == 'PASS' and not repeat and not any(x['status'] == 'withdrawn' for x in u['findings'].values())),
                          f'ревью {value}, закрыто прежних замечаний: {closed}{detail}')
         note = (f'\nПрогресс круга: закрыто прежних замечаний {closed}{detail}' if u['progress'] else
                 f'\nКРУГ БЕЗ ПРОГРЕССА ({u["stall"]} подряд): прежние замечания не закрыты')
