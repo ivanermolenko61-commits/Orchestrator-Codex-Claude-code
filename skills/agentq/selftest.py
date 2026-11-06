@@ -2585,6 +2585,31 @@ def t_acceptance_regressions():
           rc_red == 1 and codes[:2] == [1, 1] and 3 in codes and r5.count('codex-review') == 3 and u['rounds'][1]['review_merged'] is True
           and [r['progress'] for r in u['rounds']][:3] == [False, True, False], (rc_red, codes, r5.count('codex-review'), u['rounds']))
 
+    # --- первое ревью без открытых замечаний потребляет объединение с проверками; повторы того же SHA прогресса не дают
+    r6 = Proj('acc-r6')
+    r6.cr('start', 'объединение при первом ревью', '--id', 'acc-r6', '--kind', 'backend')
+    r6.script('codex', [{'text': '[ОСТАЛОСЬ F99] неизвестный\nVERDICT: PASS'}] * 8)
+    r6.commit('backend/app.py', 'def add(a, b):\n    return a + b  # FAIL_test\n')
+    r6.cr('review')
+    r6.commit('backend/app.py', 'def add(a, b):\n    return a + b  # исправлено\n')
+    codes6 = [r6.cr('review')[0] for _ in range(5)]
+    u = rstate(r6)['units']['main']
+    check('приёмка: первое ревью (без открытых замечаний) потребляет объединение с исправленными проверками; повторы того же SHA — круги без прогресса, остановка',
+          codes6[:3] == [1, 1, 1] and 3 in codes6 and r6.count('codex-review') == 3 and [r['progress'] for r in u['rounds']] == [True, False, False] and u['stall'] == 2,
+          (codes6, r6.count('codex-review'), u['rounds']))
+
+    # --- прогресс засчитывается кандидату один раз, даже если повторные ревью закрывают разные ID
+    r7 = Proj('acc-r7')
+    r7.cr('start', 'один зачёт на кандидата', '--id', 'acc-r7', '--kind', 'backend')
+    r7.script('codex', [{'text': '- [MAJOR] [НОВОЕ] backend/app.py:2 — A.\n- [MAJOR] [НОВОЕ] backend/app.py:3 — B.\nVERDICT: FIX'},
+                        {'text': '[ЗАКРЫТО F1] исправлено\nVERDICT: PASS'}, {'text': '[ЗАКРЫТО F2] исправлено\nVERDICT: PASS'}])
+    review_n(r7, 1)
+    rc_a, _, _ = review_n(r7, 2)
+    rc_b, _, _ = r7.cr('review')
+    u = rstate(r7)['units']['main']
+    check('приёмка: закрытие разных ID повторными ревью одного SHA засчитывается как один круг прогресса (затем PASS)',
+          rc_a == 1 and rc_b == 0 and fids(r7) == {'F1': 'closed', 'F2': 'closed'} and [r['progress'] for r in u['rounds']] == [True, False], (rc_a, rc_b, u['rounds']))
+
     # --- влитый frontend: изменение контекста после интеграции не даёт молчаливой приёмки
     f = Proj('acc-fe', extra={'docs/api.md': 'API v1\n'})
     f.cr('start', 'контекст после интеграции', '--id', 'acc-fe', '--kind', 'mixed', '--contract-file', f.contract())

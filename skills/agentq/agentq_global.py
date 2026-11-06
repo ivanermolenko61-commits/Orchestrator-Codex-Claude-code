@@ -2352,17 +2352,22 @@ def do_review(task, uid, effort, full):
                     **({'integrity': True} if ap['integrity'] else {})}
     u['reviewed'], u['last_report'], u['review_applied'] = tip, str(out), n
     note = ''
+    last = u['rounds'][-1] if u['rounds'] else {}
+    # Круг по исправленным проверкам этого кандидата объединяется с ПЕРВЫМ применённым ревью (даже если ревью не было повторным); флаг
+    # сохраняется вместе с вердиктом. Все последующие ревью того же SHA — отдельные круги, и прогресс кандидату засчитывается не более раза.
+    mergeable = (last.get('sha') == tip and last.get('progress') and 'исправлены падавшие проверки' in last.get('why', '')
+                 and u['progress'] is True and not last.get('review_merged'))
+    if mergeable:
+        last['review_merged'] = True
     if u['open_review']:   # повторное ревью: прогресс — закрытые прежние ID этой единицы (подтверждённые движком), а не слова в отчёте
         closed = len(ap['closed'])
         detail = (f' ({", ".join(ap["closed"])})' if closed else '') + (f'; снято как ошибочное (не прогресс): {", ".join(ap["withdrawn"])}' if ap['withdrawn'] else '')
-        last = u['rounds'][-1] if u['rounds'] else {}
-        repeat = any(r['sha'] == tip for r in u['rounds'])   # тот же SHA уже оценён: PASS без новых закрытых ID прогресса не добавляет
-        if (last.get('sha') == tip and last.get('progress') and 'исправлены падавшие проверки' in last.get('why', '') and u['progress'] is True
-                and not last.get('review_merged')):   # объединение с проверками — только с ПЕРВЫМ ревью кандидата; повторы считаются отдельными кругами
+        if mergeable:
             last['why'] += f'; ревью {value}, закрыто прежних замечаний: {closed}{detail}'   # круг этого кандидата уже засчитан по проверкам
-            last['review_merged'] = True
         else:
-            record_round(task, uid, tip, closed > 0 or (value == 'PASS' and not repeat and not any(x['status'] == 'withdrawn' for x in u['findings'].values())),
+            credited = any(r['sha'] == tip and r['progress'] for r in u['rounds'])   # прогресс этого SHA уже засчитан (проверки или закрытые ID)
+            repeat = any(r['sha'] == tip for r in u['rounds'])   # тот же SHA уже оценён: PASS без новых закрытых ID прогресса не добавляет
+            record_round(task, uid, tip, not credited and (closed > 0 or (value == 'PASS' and not repeat and not any(x['status'] == 'withdrawn' for x in u['findings'].values()))),
                          f'ревью {value}, закрыто прежних замечаний: {closed}{detail}')
         note = (f'\nПрогресс круга: закрыто прежних замечаний {closed}{detail}' if u['progress'] else
                 f'\nКРУГ БЕЗ ПРОГРЕССА ({u["stall"]} подряд): прежние замечания не закрыты')
