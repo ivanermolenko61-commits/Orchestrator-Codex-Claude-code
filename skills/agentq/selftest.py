@@ -2645,6 +2645,24 @@ def t_acceptance_regressions():
           rc == 0 and len(cred) == 1 and carried == cred and fids(r9) == {'F1': 'closed', 'F2': 'closed'} and u['rounds'][-1]['progress'] is False
           and 'уже засчитан' in u['rounds'][-1]['why'], (rc, cred, carried, u['rounds']))
 
+    # --- журнал прежней версии без списка зачтённых SHA: последний зачтённый кандидат восстанавливается по вердикту
+    r10 = Proj('acc-r10')
+    r10.cr('start', 'прежний журнал', '--id', 'acc-r10', '--kind', 'backend')
+    r10.script('codex', [{'text': '- [MAJOR] [НОВОЕ] backend/app.py:2 — A.\n- [MAJOR] [НОВОЕ] backend/app.py:3 — B.\nVERDICT: FIX'},
+                         {'text': '[ЗАКРЫТО F1] исправлено\nVERDICT: PASS'}, {'text': '[ЗАКРЫТО F2] исправлено\nVERDICT: PASS'}])
+    review_n(r10, 1)
+    review_n(r10, 2)
+    r10.cr('finish', '--abandon')
+    led = rledger(r10)
+    del led[-1]['unit_meta']['main']['credited']   # запись 1.2.0 / промежуточной сборки
+    (r10.repo / '.ai/ledger.json').write_text(json.dumps(led), encoding='utf-8')
+    r10.cr('start', 'прежний журнал', '--id', 'acc-r10b', '--kind', 'backend', '--continues', 'acc-r10')
+    carried10 = rstate(r10)['units']['main']['credited']
+    rc10, _, _ = r10.cr('review')
+    u = rstate(r10)['units']['main']
+    check('приёмка: запись журнала без списка зачтённых SHA — кандидат вердикта считается зачтённым, закрытие остального ID прогресса не добавляет',
+          rc10 == 0 and len(carried10) == 1 and fids(r10) == {'F1': 'closed', 'F2': 'closed'} and u['rounds'][-1]['progress'] is False, (rc10, carried10, u['rounds']))
+
     # --- влитый frontend: изменение контекста после интеграции не даёт молчаливой приёмки
     f = Proj('acc-fe', extra={'docs/api.md': 'API v1\n'})
     f.cr('start', 'контекст после интеграции', '--id', 'acc-fe', '--kind', 'mixed', '--contract-file', f.contract())

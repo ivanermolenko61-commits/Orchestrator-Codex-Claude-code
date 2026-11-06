@@ -713,6 +713,12 @@ def carry_unit(task, uid, u):
     u['open_checks'] = bool(m.get('open_checks'))
     u['findings'], u['finding_seq'] = copy.deepcopy(m.get('findings') or {}), m.get('finding_seq', 0)   # ID и статусы переходят вместе с расходом
     u['credited'] = list(m.get('credited') or [])   # зачтённые SHA переходят по цепочке: прогресс одного кандидата не начисляется заново
+    if 'credited' not in m and m.get('progress') is True:   # запись прежней версии без списка: последний засчитанный кандидат — тот, на котором получен вердикт
+        legacy = (verdicts.get(uid) or {}).get('sha')
+        if legacy:
+            u['credited'].append(legacy)
+        else:
+            warn(f'{uid}: в записи прежней версии нет списка зачтённых SHA и вердикта — какой кандидат уже получил зачёт прогресса, восстановить нельзя')
     u['findings_imported'] = m.get('findings_imported')   # запись без реестра (прежняя версия): импорт из отчёта при первом вызове, см. ensure_registry
     mine = verdicts.get(uid) or {}
     u['open_review'] = mine.get('value') not in (None, 'PASS')
