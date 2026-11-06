@@ -7,6 +7,7 @@
 роли и владение файлами, защищённые зоны, учебный режим, недоступность сервиса без подмены автора.
 Каталоги проверок создаются во временной папке и не удаляются (сообщение в конце).
 """
+import hashlib
 import importlib.util
 import json
 import os
@@ -85,7 +86,10 @@ with (d / 'calls.log').open('a') as f:
     f.write('claude-review model=' + a[a.index('--model') + 1] + ' tools=' + repr(a[a.index('--tools') + 1]) + ' nosession=' + str('--no-session-persistence' in a) + '\n')
 (d / f'claude-prompt-{n}.txt').write_text(prompt, encoding='utf-8')
 sc = json.loads((d / 'claude.json').read_text())[n]
-print(json.dumps({'is_error': False, 'subtype': 'success', 'structured_output': sc}))
+out = {'is_error': False, 'subtype': 'success', 'structured_output': sc}
+if (d / 'claude_usage.json').exists():
+    out['usage'] = json.loads((d / 'claude_usage.json').read_text())
+print(json.dumps(out))
 '''
 
 FAKE_DOCKER = r"""
@@ -132,6 +136,7 @@ OK = {'verdict': 'PASS', 'summary': 'ok', 'findings': []}
 FIXV = {'verdict': 'FIX', 'summary': 'нужно исправить',
         'findings': [{'severity': 'MAJOR', 'location': 'frontend/src/App.tsx:6', 'problem': 'нет обработки пустого списка.', 'fix': 'добавить заглушку'}]}
 UNC = {'verdict': 'UNCERTAIN', 'summary': 'не могу подтвердить', 'findings': []}
+OKC1 = {'verdict': 'PASS', 'summary': 'ok', 'findings': [], 'prior': [{'id': 'F1', 'status': 'closed', 'note': 'исправлено в коде'}]}
 
 results = []
 
@@ -244,7 +249,7 @@ def t_backend():
     check('backend: start', p.cr('start', 'бэкенд: сложение', '--id', 'be-add')[0] == 0)
     p.commit('backend/app.py', 'def add(a, b):\n    return a + b + 0\n')
     p.script('codex', [{'text': '- [MAJOR] backend/app.py:2 — лишний ноль. Как исправить: убрать.\nVERDICT: FIX'},
-                       {'text': 'Замечаний нет.\nVERDICT: PASS'}])
+                       {'text': '[ЗАКРЫТО F1] лишний ноль убран\nЗамечаний нет.\nVERDICT: PASS'}])
     rc, out, _ = p.cr('review')
     check('backend: автор Claude → ревью Codex, FIX (1)', rc == 1 and p.count('codex-review model=gpt-6.1-sol') == 1 and p.count('claude') == 0, p.calls())
     p.commit('backend/app.py', 'def add(a, b):\n    return a + b\n', 'fix')
@@ -289,7 +294,7 @@ def t_frontend_cycle():
     p.cr('start', 'фронтенд: список', '--id', 'fe-list', '--kind', 'mixed', '--contract-file', p.contract())
     p.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES, '--context', 'backend/app.py')
     p.script('codex', [{'files': FILES_OK1}, {'files': FILES_OK2}])
-    p.script('claude', [FIXV, OK])
+    p.script('claude', [FIXV, OKC1])
     rc, out, err = p.cr('cycle', 'fe')
     check('frontend: цикл Codex→Claude: FIX возвращён автору автоматически, затем PASS (0)', rc == 0 and 'PASS' in out, out + err)
     check('frontend: 2 вызова автора Codex и 2 ревью Claude, Codex-ревью нет',
@@ -560,8 +565,9 @@ def t_task_budget_scope():
     """Бюджет принадлежит конкретной задаче плана: после принятой задачи следующая начинает с нуля, незавершённая сохраняет расход
     при новом запуске даже после другой самостоятельной задачи; предел Ивана действует только на ту цепочку, для которой задан."""
     pas = {'text': 'VERDICT: PASS'}
+    pas_c = {'text': '[ЗАКРЫТО F1] исправлено\n[ЗАКРЫТО F2] исправлено\nVERDICT: PASS'}
     p = Proj('scope')
-    p.script('codex', [FIX_T, FIX_T, pas] + [FIX_T] * 3 + [pas])
+    p.script('codex', [FIX_T, fixc(1), pas_c] + [FIX_T] * 3 + [pas])
     p.cr('start', 'задача плана один', '--id', 'plan-1', '--max-calls', '4')
     rcs = [review_n(p, n)[0] for n in range(3)]
     rc_fin, out, _ = p.cr('finish')
@@ -650,7 +656,7 @@ def t_mixed():
     check('mixed: protected-единица', p.cr('unit', 'cfg', '--kind', 'protected', '--files', 'package.json')[0] == 0)
     check('mixed: frontend-единица после backend', p.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES, '--after', 'be')[0] == 0)
     p.script('codex', [{'text': '- [MAJOR] backend/app.py:2 — нет проверки типов. Как исправить: добавить.\nVERDICT: FIX'},
-                       {'text': 'VERDICT: PASS'}, {'files': FILES_OK1}])
+                       {'text': '[ЗАКРЫТО F1] проверка типов добавлена\nVERDICT: PASS'}, {'files': FILES_OK1}])
     p.script('claude', [OK])
     rc, _, err = p.cr('cycle', 'fe')
     check('mixed: frontend не стартует, пока backend не принят; вызовов нет, код 5 WAIT', rc == 5 and 'принята единица be' in err and 'WAIT' in err and not p.calls(), err)
@@ -883,7 +889,7 @@ def t_checks():
     y.cr('start', 'структурный PASS с MAJOR', '--id', 'chk-cf', '--kind', 'mixed', '--contract-file', y.contract())
     y.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
     y.script('codex', [{'files': FILES_OK1}, {'files': FILES_OK2}])
-    y.script('claude', [{'verdict': 'PASS', 'summary': 's', 'findings': FIXV['findings']}, OK])
+    y.script('claude', [{'verdict': 'PASS', 'summary': 's', 'findings': FIXV['findings']}, OKC1])
     rc, out, err = y.cr('cycle', 'fe')
     check('Claude-вердикт PASS с MAJOR в structured findings считается FIX и возвращается автору', rc == 0 and y.count('codex-author') == 2 and y.count('claude-review') == 2, out + err)
 
@@ -1124,7 +1130,7 @@ def t_checks():
     ri = Proj('chk-incremental')
     ri.cr('start', 'повторное ревью backend инкрементально', '--id', 'chk-in', '--kind', 'backend')
     ri.commit('backend/app.py', ADD2)
-    ri.script('codex', [{'text': '- [MAJOR] backend/app.py:2 — лишнее. Как исправить.\nVERDICT: FIX'}, {'text': 'VERDICT: PASS'}])
+    ri.script('codex', [{'text': '- [MAJOR] backend/app.py:2 — лишнее. Как исправить.\nVERDICT: FIX'}, {'text': '[ЗАКРЫТО F1] убрано\nVERDICT: PASS'}])
     ri.cr('review')
     ri.commit('backend/app.py', 'def add(a, b):\n    return a + b\n', 'fix')
     rc, out, err = ri.cr('review')
@@ -1276,7 +1282,9 @@ def t_review_fixes():
 
 
 FIX_T = {'text': '- [MAJOR] backend/app.py:2 — плохо.\nVERDICT: FIX'}
-FIXC_T = {'text': '- [MAJOR] backend/app.py:2 — осталось.\n[ЗАКРЫТО] прежнее замечание исправлено\nVERDICT: FIX'}
+def fixc(k):
+    """Ответ reviewer: закрыт прежний F<k> (явный ID), найдено новое существенное замечание."""
+    return {'text': f'- [MAJOR] backend/app.py:2 — осталось.\n[ЗАКРЫТО F{k}] прежнее замечание исправлено\nVERDICT: FIX'}
 BODY_T = 'def add(a, b):\n    return a + b  # {n}\n'
 NOTE_T = 'упростить: убрать вложенные ветки и проверить границы в одном месте'
 
@@ -1300,7 +1308,7 @@ def t_progress_policy():
     возвращают управление тимлиду, повторное зацикливание после пересмотра — окончательная остановка, явный предел Ивана жёсткий."""
     p = Proj('prog')
     p.cr('start', 'прогресс', '--id', 'pg-1', '--kind', 'backend')
-    p.script('codex', [FIX_T, FIXC_T, FIXC_T, FIXC_T, FIXC_T, {'text': 'VERDICT: PASS'}])
+    p.script('codex', [FIX_T, fixc(1), fixc(2), fixc(3), fixc(4), {'text': '[ЗАКРЫТО F5] исправлено\nVERDICT: PASS'}])
     rcs = [review_n(p, n)[0] for n in range(1, 6)]
     check('прогресс: контрольная точка (3 ревью) не запрещает продолжение — закрытые замечания, ревью 4 и 5 состоялись',
           rcs == [1] * 5 and p.count('codex-review') == 5, rcs)
@@ -1308,8 +1316,9 @@ def t_progress_policy():
     second = (p.fake / 'codex-prompt-1.txt').read_text(encoding='utf-8')
     check('запрос reviewer: критерии готовности, границы, минимальное решение и доказательность BLOCKER/MAJOR',
           all(x in first for x in ('КРИТЕРИИ ГОТОВНОСТИ', 'ГРАНИЦЫ', 'МИНИМАЛЬНОЕ ДОСТАТОЧНОЕ', 'ДОКАЗАТЕЛЬНОСТЬ', 'сценарий')), first[:300])
-    check('первое ревью без статусов прежних замечаний, повторное — со статусами [ЗАКРЫТО]/[ОСТАЛОСЬ]/[НОВОЕ] и прежним отчётом',
-          'СТАТУС ПРЕЖНИХ ЗАМЕЧАНИЙ' not in first and 'СТАТУС ПРЕЖНИХ ЗАМЕЧАНИЙ' in second and '[ОСТАЛОСЬ]' in second and '=== ПРОШЛЫЕ ЗАМЕЧАНИЯ ===' in second)
+    check('первое ревью без статусов прежних замечаний, повторное — со статусами [ЗАКРЫТО F<n>]/[ОСТАЛОСЬ F<n>]/[СНЯТО F<n>]/[НОВОЕ] и реестром ID',
+          'СТАТУС ПРЕЖНИХ ЗАМЕЧАНИЙ' not in first and 'СТАТУС ПРЕЖНИХ ЗАМЕЧАНИЙ' in second and '[ОСТАЛОСЬ F<n>]' in second
+          and '=== ПРОШЛЫЕ ЗАМЕЧАНИЯ ===' in second and 'F1 [MAJOR]' in second)
     st = rstate(p)['units']['main']
     check('история кругов в состоянии: прогресс по закрытию замечаний, а не по числу', st['stall'] == 0 and st['progress'] is True
           and [r['progress'] for r in st['rounds']] == [True] * 4, st['rounds'])
@@ -1322,7 +1331,7 @@ def t_progress_policy():
 
     q = Proj('prog-stop')
     q.cr('start', 'остановка', '--id', 'ps-1', '--kind', 'backend')
-    q.script('codex', [FIX_T, FIXC_T, FIX_T, FIX_T, FIX_T, FIX_T])
+    q.script('codex', [FIX_T, fixc(1), FIX_T, FIX_T, FIX_T, FIX_T])
     for n in (1, 2, 3):
         review_n(q, n)
     q.commit('backend/app.py', BODY_T.format(n=4))
@@ -1359,7 +1368,7 @@ def t_progress_policy():
 
     h = Proj('prog-hard')
     h.cr('start', 'предел', '--id', 'ph-1', '--kind', 'backend', '--max-calls', '2')
-    h.script('codex', [FIXC_T] * 4)
+    h.script('codex', [FIX_T, fixc(1), fixc(2), fixc(3)])
     review_n(h, 1)
     review_n(h, 2)
     rc, _, err = review_n(h, 3)
@@ -1449,6 +1458,11 @@ def t_cont_g():
     g.cr('review')
     rep1 = rstate(g)['units']['main']['last_report']
     g.cr('finish', '--abandon')
+    led = rledger(g)
+    for m in led[0]['unit_meta'].values():   # журнал прежней версии: описание единицы без реестра замечаний
+        for k in ('findings', 'finding_seq', 'findings_imported'):
+            m.pop(k, None)
+    (g.repo / '.ai/ledger.json').write_text(json.dumps(led), encoding='utf-8')
     g.cr('start', 'работа', '--id', 'cg-2', '--kind', 'backend', '--continues', 'cg-1')
     check('G: база единицы продолжения — исходная база прежней работы', rstate(g)['units']['main']['base'] == base0)
     g.commit('backend/app.py', 'def add(a, b):\n    return a + b  # MARKER_FIRST\n\n\ndef sub(a, b):\n    return a - b\n')
@@ -1462,7 +1476,23 @@ def t_cont_g():
     diff = prompt.split('=== DIFF ===')[-1]
     check('G: ревью продолжения видит изменения прежней работы (добавленная строка первой задачи в diff)',
           rc == 1 and any(x.startswith('+') and 'MARKER_FIRST' in x for x in diff.splitlines()), err)
-    check('G: прежние замечания идут в запрос дословно', 'ПРОШЛЫЕ ЗАМЕЧАНИЯ' in prompt and Path(rep1).read_text(encoding='utf-8').strip() in prompt)
+    check('G: замечания отчёта прежней версии идут в запрос с постоянными ID (импорт из отчёта один раз)',
+          'F1 [MAJOR]' in prompt and 'плохо' in prompt and rstate(g)['units']['main']['findings_imported']['count'] == 1)
+
+    g2 = Proj('contG2')
+    g2.cr('start', 'работа', '--id', 'cg2-1', '--kind', 'backend')
+    g2.script('codex', [FIX_T] * 3)
+    g2.commit('backend/app.py', 'def add(a, b):\n    return a + b  # M\n')
+    g2.cr('review')
+    rep2 = rstate(g2)['units']['main']['last_report']
+    g2.cr('finish', '--abandon')
+    g2.cr('start', 'работа', '--id', 'cg2-2', '--kind', 'backend', '--continues', 'cg2-1')
+    os.replace(rep2, rep2 + '.moved')
+    g2.commit('backend/app.py', 'def add(a, b):\n    return a + b  # M2\n')
+    rc, _, err = g2.cr('review')
+    pr = sorted(g2.fake.glob('codex-prompt-*.txt'), key=lambda f: int(f.stem.split('-')[-1]))[-1].read_text(encoding='utf-8')
+    check('G: реестр с ID переехал вместе с работой — потерянный текст отчёта не останавливает ревью, прежние замечания в запросе',
+          rc == 1 and 'F1 [MAJOR]' in pr and g2.count('codex-review') == 2, err)
 
     L = Proj('contGL')
     L.cr('start', 'работа', '--id', 'gl-1', '--kind', 'backend')
@@ -1970,11 +2000,476 @@ def t_parallel():
     check('parallel: ответ прерванного вызова не получен — повтор запрещён, оплата не повторяется', rc == 2 and 'повтор' in err and k.count('codex-author') == 1, err)
 
 
+APP_V3 = APP_V2.replace('[1, 2, 3, 4]', '[1, 2, 3, 4, 5]')
+FILES_OK3 = {'frontend/src/App.tsx': APP_V3, 'frontend/src/App.test.tsx': TEST_V1}
+NOTE_OK = 'исправлено в коде'
+
+
+def okc(*ids):
+    """Структурный PASS Claude-reviewer с явным закрытием перечисленных ID."""
+    return {'verdict': 'PASS', 'summary': 'ok', 'findings': [], 'prior': [{'id': i, 'status': 'closed', 'note': NOTE_OK} for i in ids]}
+
+
+def fids(x, uid='main'):
+    return {k: v['status'] for k, v in rstate(x)['units'][uid]['findings'].items()}
+
+
+def codex_prompts(x):
+    return sorted(x.fake.glob('codex-prompt-*.txt'), key=lambda f: int(f.stem.split('-')[-1]))
+
+
+def t_findings():
+    """Постоянные ID существенных замечаний (1.3.0): ID сохраняются, закрытие проверяет движок, неоднозначный отчёт не даёт PASS."""
+    # --- A. сквозной сценарий и восстановление
+    a = Proj('fid-a')
+    a.cr('start', 'ID замечаний', '--id', 'fid-a', '--kind', 'backend')
+    r1 = {'text': '- [MAJOR] [НОВОЕ] backend/app.py:2 — риск A; сценарий: пустой ввод; доказательство: строка 2; закрытие: тест на пустой ввод.\n'
+                  '- [BLOCKER] [НОВОЕ] backend/app.py:3 — риск B.\nVERDICT: FIX'}
+    r2 = {'text': '[ОСТАЛОСЬ F1] то же самое, другими словами\n[ЗАКРЫТО F2] исправлено в коде\n> [ЗАКРЫТО F1] цитата не считается\n'
+                  '- [MINOR] [НОВОЕ] мелочь\nVERDICT: FIX'}
+    r3 = {'text': 'Пояснение: статус «[ЗАКРЫТО F1]» здесь только упомянут.\n```\n[ЗАКРЫТО F1] внутри блока кода\n```\n'
+                  '[ЗАКРЫТО F1] первое\n[ЗАКРЫТО F1] второе\n[ЗАКРЫТО F9] неизвестный\n[ЗАКРЫТО F2] уже закрыт\nVERDICT: FIX'}
+    r4 = {'text': '[ЗАКРЫТО F1] исправлено в коде\nVERDICT: PASS'}
+    a.script('codex', [r1, r2, r3, r4])
+    review_n(a, 1)
+    u = rstate(a)['units']['main']
+    fs = u['findings']
+    check('ID: первое ревью регистрирует F1 (MAJOR) и F2 (BLOCKER) с условием закрытия',
+          sorted(fs) == ['F1', 'F2'] and fs['F1']['severity'] == 'MAJOR' and fs['F2']['severity'] == 'BLOCKER' and u['finding_seq'] == 2
+          and 'тест на пустой ввод' in fs['F1']['close_when'] and u['stall'] == 0, fs)
+    rep = Path(u['last_report']).read_text(encoding='utf-8')
+    check('ID: отчёт ревью дополнен записью движка с присвоенными ID', 'ДВИЖОК: реестр замечаний' in rep and 'F1 [MAJOR]' in rep, rep)
+    snap = json.loads(json.dumps(fs))
+    state_edit(a, lambda s: s['units']['main'].update(findings={}, finding_seq=0, verdict=None, reviewed=None, review_applied=0,
+                                                       status='open', open_review=False, last_report=None))
+    rc, _, err = a.cr('review')
+    u2 = rstate(a)['units']['main']
+    check('ID: восстановление после сбоя до сохранения вердикта — нового вызова нет, реестр тот же, номера не дублируются',
+          rc == 1 and a.count('codex-review') == 1 and u2['findings'] == snap and u2['finding_seq'] == 2, (rc, err, u2['findings']))
+    rc, out, _ = review_n(a, 2)
+    pr = codex_prompts(a)[1].read_text(encoding='utf-8')
+    u = rstate(a)['units']['main']
+    check('ID: повторное ревью получает реестр прежних ID, условие закрытия и правила статусов',
+          'F1 [MAJOR]' in pr and 'F2 [BLOCKER]' in pr and 'Условие закрытия: тест на пустой ввод' in pr and 'СТАТУС ПРЕЖНИХ ЗАМЕЧАНИЙ' in pr, pr[:1500])
+    check('ID: переформулировка сохраняет номер, F2 закрыт, цитата [ЗАКРЫТО F1] не считается, прогресс — по закрытому ID',
+          u['findings']['F1']['status'] == 'open' and u['findings']['F2']['status'] == 'closed' and u['finding_seq'] == 2
+          and u['findings']['F1']['last'].startswith('то же самое') and u['progress'] is True and u['stall'] == 0
+          and 'закрыто прежних замечаний: 1 (F2)' in u['rounds'][-1]['why'], u)
+    rc, out, err = review_n(a, 3)
+    u = rstate(a)['units']['main']
+    check('ID: повторённый, неизвестный, уже закрытый ID, метка в блоке кода и в пояснении не создают прогресс',
+          u['findings']['F1']['status'] == 'open' and u['progress'] is False and u['stall'] == 1 and u['finding_seq'] == 2, u)
+    check('ID: диагностика названа явно (повтор, неизвестный ID, уже закрытый)',
+          'F1: упомянут 2 раза' in out and 'F9: нет в реестре' in out and 'F2: уже закрыт' in out and 'КРУГ БЕЗ ПРОГРЕССА' in out, out)
+    rc, out, _ = a.cr('status')
+    check('ID: status показывает счёт замечаний', 'замечания: открыто 1 (F1), закрыто 1, снято 0' in out, out)
+    rc, _, err = review_n(a, 40)
+    check('ID: после трёх ревью и круга без прогресса контрольная точка действует (нового вызова нет), число ревью не растёт без закрытых ID',
+          rc == 3 and 'контрольная точка' in err and a.count('codex-review') == 3, err)
+    a.cr('rethink', 'main', NOTE_T)
+    rc, out, err = review_n(a, 4)
+    final = fids(a)
+    rc_f, out_f, _ = a.cr('finish')
+    check('ID: явное закрытие последнего открытого ID → PASS, приёмка VERIFIED; F1 закрыт на другом SHA, чем открыт',
+          rc == 0 and rc_f == 0 and 'ACCEPTANCE: VERIFIED' in out_f and final == {'F1': 'closed', 'F2': 'closed'}, out + err + out_f)
+
+    # --- B. PASS без статуса открытого ID не принимается, повтор того же SHA
+    b = Proj('fid-b')
+    b.cr('start', 'PASS без закрытия', '--id', 'fid-b', '--kind', 'backend')
+    b.script('codex', [FIX_T, {'text': 'VERDICT: PASS'}, {'text': '[ЗАКРЫТО F1] исправлено\nVERDICT: PASS'}])
+    review_n(b, 1)
+    rc, out, err = review_n(b, 2)
+    u = rstate(b)['units']['main']
+    check('ID: PASS без статуса открытого ID — UNCERTAIN с диагностикой, закрытие не выдумано, прогресса нет',
+          rc == 1 and u['verdict']['value'] == 'UNCERTAIN' and u['verdict'].get('integrity') and u['findings']['F1']['status'] == 'open'
+          and 'нет статуса: F1' in out and u['progress'] is False, out + err)
+    rc_f, out_f, _ = b.cr('finish')
+    check('ID: незакрытый BLOCKER/MAJOR исключает приёмку', rc_f == 1 and 'НЕ ПОДТВЕРЖДЕНА' in out_f, out_f)
+    rc, out, err = b.cr('review')
+    final = fids(b)
+    rc_f, out_f, _ = b.cr('finish')
+    check('ID: после неоднозначного отчёта тот же SHA ревьюится заново (новый вызов), затем PASS и приёмка',
+          rc == 0 and b.count('codex-review') == 3 and rc_f == 0 and final == {'F1': 'closed'}, out + err + out_f)
+
+    # --- C. PASS при «осталось»; снятие как ошибочного
+    c = Proj('fid-c')
+    c.cr('start', 'PASS и осталось', '--id', 'fid-c', '--kind', 'backend')
+    c.script('codex', [{'text': '- [MAJOR] [НОВОЕ] backend/app.py:2 — A.\n- [MAJOR] [НОВОЕ] backend/app.py:3 — B.\nVERDICT: FIX'},
+                       {'text': '[ОСТАЛОСЬ F1] ещё\n[ЗАКРЫТО F2] исправлено\nVERDICT: PASS'},
+                       {'text': '[СНЯТО F1] замечание ошибочно: требование не относится к этой задаче\nVERDICT: PASS'}])
+    review_n(c, 1)
+    rc, out, _ = review_n(c, 2)
+    u = rstate(c)['units']['main']
+    check('ID: PASS при заявленном «ОСТАЛОСЬ» считается FIX; закрытый F2 засчитан',
+          rc == 1 and u['verdict']['value'] == 'FIX' and fids(c) == {'F1': 'open', 'F2': 'closed'} and 'PASS при заявленном' in out, out)
+    rc, out, _ = review_n(c, 3)
+    u = rstate(c)['units']['main']
+    check('ID: обоснованное снятие допускает PASS, но записано как «снято», а не «закрыто»',
+          rc == 0 and fids(c) == {'F1': 'withdrawn', 'F2': 'closed'} and 'снято как ошибочное' in u['rounds'][-1]['why'], u)
+
+    # --- D. снятие само по себе — не прогресс; метка «осталось» без ID; снятие без обоснования
+    d = Proj('fid-d')
+    d.cr('start', 'снятие не прогресс', '--id', 'fid-d', '--kind', 'backend')
+    d.script('codex', [{'text': '- [MAJOR] [НОВОЕ] backend/app.py:2 — A.\n- [MAJOR] [НОВОЕ] backend/app.py:3 — B.\nVERDICT: FIX'},
+                       {'text': '[СНЯТО F1] замечание ошибочно: требование не относится к этой задаче\n- [MAJOR] [ОСТАЛОСЬ] backend/app.py:3 — без ID\nVERDICT: FIX'},
+                       {'text': '[СНЯТО F2] коротко\nVERDICT: FIX'}])
+    review_n(d, 1)
+    rc, out, _ = review_n(d, 2)
+    u = rstate(d)['units']['main']
+    check('ID: снятие без исправлений — не прогресс; «ОСТАЛОСЬ» без ID не сопоставляется, а регистрируется как новое; F2 без статуса остаётся открытым',
+          fids(d) == {'F1': 'withdrawn', 'F2': 'open', 'F3': 'open'} and u['progress'] is False and u['stall'] == 1
+          and 'снято как ошибочное (не прогресс): F1' in u['rounds'][-1]['why'] and 'Снято как ошибочное' in out and 'нет статуса: F2' in out, (fids(d), out))
+    rc, out, _ = review_n(d, 3)
+    check('ID: «СНЯТО» без обоснования не закрывает замечание', fids(d)['F2'] == 'open' and 'без обоснования' in out, out)
+
+    # --- E. состояние и отчёт прежней версии: единственный явный переход — импорт открытых BLOCKER/MAJOR из отчёта
+    e = Proj('fid-e')
+    e.cr('start', 'старое состояние', '--id', 'fid-e', '--kind', 'backend')
+    e.script('codex', [FIX_T, {'text': '[ЗАКРЫТО] прежнее исправлено\nVERDICT: FIX'}, {'text': '[ЗАКРЫТО F1] исправлено\nVERDICT: PASS'}])
+    review_n(e, 1)
+    state_edit(e, lambda s: s['units']['main'].update(findings={}, finding_seq=0, findings_imported=None))
+    rc, out, _ = review_n(e, 2)
+    u = rstate(e)['units']['main']
+    pr = codex_prompts(e)[1].read_text(encoding='utf-8')
+    check('переход: открытое замечание старого отчёта регистрируется один раз как F1; закрытие без ID не засчитано, закрытий не выдумано',
+          u['findings_imported']['count'] == 1 and 'F1 [MAJOR]' in pr and fids(e) == {'F1': 'open'} and u['progress'] is False and u['stall'] == 1
+          and 'без допустимого ID' in out and len(rstate(e)['calls']) == 2, (u['findings_imported'], fids(e), out))
+    rc, out, _ = review_n(e, 3)
+    check('переход: после импорта явное закрытие по ID принимается, расход и история сохранены',
+          rc == 0 and fids(e) == {'F1': 'closed'} and len(rstate(e)['calls']) == 3, out)
+
+    # --- F. продолжение (--continues) сохраняет реестр, счётчик номеров и не переиспользует их
+    g = Proj('fid-f')
+    g.cr('start', 'продолжение ID', '--id', 'fid-f1', '--kind', 'backend')
+    g.script('codex', [FIX_T, {'text': '[ЗАКРЫТО F1] исправлено\n- [MAJOR] [НОВОЕ] backend/app.py:2 — новое.\nVERDICT: FIX'}])
+    review_n(g, 1)
+    g.cr('finish', '--abandon')
+    led = rledger(g)
+    check('ID: реестр записан в журнал задачи', led[0]['unit_meta']['main']['findings']['F1']['status'] == 'open'
+          and led[0]['unit_meta']['main']['finding_seq'] == 1, led[0]['unit_meta'])
+    g.cr('start', 'продолжение ID', '--id', 'fid-f2', '--kind', 'backend', '--continues', 'fid-f1')
+    u0 = rstate(g)['units']['main']
+    check('ID: --continues переносит реестр и счётчик номеров вместе с расходом', fids(g) == {'F1': 'open'} and u0['finding_seq'] == 1
+          and rstate(g)['inherited']['calls'] == 1, u0)
+    review_n(g, 2)
+    pr = codex_prompts(g)[1].read_text(encoding='utf-8')
+    check('ID: ревью продолжения видит прежний F1; новое замечание получает F2, закрытый номер не переиспользуется',
+          'F1 [MAJOR]' in pr and fids(g) == {'F1': 'closed', 'F2': 'open'} and rstate(g)['units']['main']['finding_seq'] == 2, (fids(g), pr[:800]))
+    g.cr('finish', '--abandon')
+    led = rledger(g)
+    bad = json.loads(json.dumps(led))
+    bad[-1]['unit_meta']['main']['findings']['F2']['status'] = 'странный'
+    (g.repo / '.ai/ledger.json').write_text(json.dumps(bad), encoding='utf-8')
+    rc, _, err = g.cr('start', 'ещё раз', '--id', 'fid-f3', '--kind', 'backend', '--continues', 'fid-f2')
+    check('ID: повреждённый реестр в журнале — продолжение отказано до вызовов', rc == 2 and 'реестр замечаний' in err, err)
+    (g.repo / '.ai/ledger.json').write_text(json.dumps(led), encoding='utf-8')
+    rc, _, err = g.cr('start', 'ещё раз', '--id', 'fid-f3', '--kind', 'backend', '--continues', 'fid-f2')
+    check('ID: журнал восстановлен — продолжение цепочки работает, реестр на месте', rc == 0 and fids(g) == {'F1': 'closed', 'F2': 'open'}, err)
+
+    # --- G. единицы не влияют на ID и прогресс друг друга
+    h = Proj('fid-g', extra={'backend/b.py': 'B = 1\n'})
+    h.cr('start', 'независимость единиц', '--id', 'fid-g', '--kind', 'mixed', '--contract-file', h.contract())
+    h.cr('unit', 'u1', '--kind', 'backend', '--files', 'backend/app.py')
+    h.cr('unit', 'u2', '--kind', 'backend', '--files', 'backend/b.py')
+    h.script('codex', [FIX_T, {'text': '- [MAJOR] [НОВОЕ] backend/b.py:1 — другое.\nVERDICT: FIX'}, {'text': '[ЗАКРЫТО F1] исправлено\nVERDICT: PASS'}])
+    h.commit('backend/app.py', BODY_T.format(n=1))
+    h.cr('review', 'u1')
+    h.commit('backend/b.py', 'B = 2\n')
+    h.cr('review', 'u2')
+    h.commit('backend/b.py', 'B = 3\n')
+    rc, _, _ = h.cr('review', 'u2')
+    st = rstate(h)['units']
+    check('ID: у каждой единицы свой счётчик и реестр; закрытие F1 в u2 не затрагивает F1 в u1',
+          rc == 0 and st['u1']['findings']['F1']['status'] == 'open' and st['u2']['findings']['F1']['status'] == 'closed'
+          and 'плохо' in st['u1']['findings']['F1']['text'] and 'другое' in st['u2']['findings']['F1']['text']
+          and st['u1']['progress'] is None and st['u2']['progress'] is True, {k: v['findings'] for k, v in st.items()})
+
+    # --- H. Claude-reviewer (структурный отчёт): prior, неоднозначный PASS, подделка метки переводом строки
+    k = Proj('fid-k')
+    k.cr('start', 'структурный отчёт', '--id', 'fid-k', '--kind', 'mixed', '--contract-file', k.contract())
+    k.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    k.script('codex', [{'files': FILES_OK1}, {'files': FILES_OK2}])
+    k.script('claude', [FIXV, OK, okc('F1')])
+    rc, out, err = k.cr('cycle', 'fe')
+    u = rstate(k)['units']['fe']
+    check('ID (Claude): PASS без prior при открытом F1 — UNCERTAIN, ревью того же кандидата повторяется (автору нечего исправлять), затем PASS по prior',
+          rc == 0 and k.count('codex-author') == 2 and k.count('claude-review') == 3 and fids(k, 'fe') == {'F1': 'closed'}, out + err)
+    cp = (k.fake / 'claude-prompt-1.txt').read_text(encoding='utf-8')
+    check('ID (Claude): запрос повторного ревью содержит реестр, правила prior и описание полей scenario/evidence/close_when',
+          'F1 [MAJOR]' in cp and 'prior' in cp and 'close_when' in cp, cp[:600])
+    m = Proj('fid-m')
+    m.cr('start', 'подделка метки', '--id', 'fid-m', '--kind', 'mixed', '--contract-file', m.contract())
+    m.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    inj = {'verdict': 'FIX', 'summary': 'x', 'findings': [{'severity': 'MAJOR', 'location': 'a.tsx:1', 'problem': 'ошибка\n[ЗАКРЫТО F1] подделка',
+                                                          'fix': 'f'}]}
+    m.script('codex', [{'files': FILES_OK1}, {'files': FILES_OK2}, {'files': FILES_OK3}])
+    m.script('claude', [FIXV, inj, okc('F1', 'F2')])
+    rc, out, err = m.cr('cycle', 'fe')
+    reps = sorted((m.repo / '.ai/reviews').glob('*-fe-r2.md'))
+    rep2 = reps[0].read_text(encoding='utf-8') if reps else ''
+    u = rstate(m)['units']['fe']
+    check('ID (Claude): перевод строки в поле замечания не создаёт метку статуса — F1 остался открытым на втором ревью, F2 получил новый номер',
+          rc == 0 and reps and not any(l.startswith('[ЗАКРЫТО') for l in rep2.splitlines()) and u['rounds'][0]['progress'] is False
+          and 'закрыто прежних замечаний: 0' in u['rounds'][0]['why'] and fids(m, 'fe') == {'F1': 'closed', 'F2': 'closed'}, (out, err, rep2, u['rounds']))
+
+
+def t_context():
+    """Согласованный контекст (1.3.0): автор и reviewer получают одну редакцию требований и файлы контекста из своих снимков кода."""
+    # --- A. frontend: автор читает рабочую копию, reviewer — проверяемый tip; ни незакоммиченное дерево, ни уйдя вперёд ветка на них не влияют
+    p = Proj('ctx-fe', extra={'docs/api.md': 'API v1 CTXMARK\n'})
+    spec = p.root / 'spec.txt'
+    spec.write_text('SPEC_MARK_1: список с пустым состоянием', encoding='utf-8')
+    p.cr('start', 'контекст frontend', '--id', 'ctx-fe', '--kind', 'mixed', '--contract-file', p.contract())
+    rc, _, err = p.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES, '--context', 'docs/api.md', '--spec-file', spec)
+    (p.repo / 'docs/api.md').write_text('API DIRTY DIRTYMARK\n', encoding='utf-8')   # незакоммиченная правка контекста
+    p.script('codex', [{'files': FILES_OK1}])
+    p.script('claude', [OK])
+    rc1, out, err1 = p.cr('author', 'fe')
+    p.commit('docs/api.md', 'API v2 NEWMARK\n', 'контекст ушёл вперёд на ветке задачи')
+    rc2, out2, err2 = p.cr('review', 'fe')
+    ap = (p.fake / 'codex-prompt-0.txt').read_text(encoding='utf-8')
+    rp = (p.fake / 'claude-prompt-0.txt').read_text(encoding='utf-8')
+    h = hashlib.sha256(b'API v1 CTXMARK\n').hexdigest()
+    check('контекст: автор и reviewer получили файл контекста из своих снимков (зафиксированная версия, а не рабочее дерево и не ушедшая вперёд ветка)',
+          rc == 0 and rc1 == 0 and rc2 == 0 and 'CTXMARK' in ap and 'CTXMARK' in rp and 'DIRTYMARK' not in ap + rp and 'NEWMARK' not in ap + rp, (err, err1, err2))
+    check('контекст: помечен как данные только для чтения, указаны путь и sha256 одного и того же содержимого',
+          f'docs/api.md [sha256:{h[:12]}]' in ap and f'docs/api.md [sha256:{h[:12]}]' in rp and 'только чтение' in ap and 'только чтение' in rp)
+    line = [l for l in ap.splitlines() if l.startswith('Редакция требований')]
+    check('контекст: автор и reviewer получили одну редакцию требований (контракт и спецификация), текст спецификации идёт в оба запроса',
+          line and line == [l for l in rp.splitlines() if l.startswith('Редакция требований')] and 'SPEC_MARK_1' in ap and 'SPEC_MARK_1' in rp, line)
+    calls = rstate(p)['calls']
+    want = [{'path': 'docs/api.md', 'sha256': h}]
+    check('контекст: что именно видел участник записано в запись вызова (путь и sha256, редакция требований)',
+          calls['fe:author:1']['context'] == want and calls['fe:review:1']['context'] == want
+          and calls['fe:author:1']['requirements'] == calls['fe:review:1']['requirements'], calls)
+    check('контекст: вердикт хранит редакцию контекста, на которой получен', rstate(p)['units']['fe']['verdict']['context'] == want)
+    head = p.git('rev-parse', 'HEAD')
+    rc, _, err = p.cr('integrate', 'fe')
+    check('контекст: ветка ушла вперёд и изменила контекст — integrate отказан явно, ветка не тронута (PASS не переносится на другой смысл)',
+          rc == 2 and 'контекст изменился' in err and 'docs/api.md' in err and p.git('rev-parse', 'HEAD') == head, err)
+
+    # --- B. backend: reviewer читает tip; изменение контекста после PASS отменяет приёмку до finish и требует полного ревью
+    b = Proj('ctx-be', extra={'docs/api.md': 'API v1 CTXMARK\n'})
+    b.cr('start', 'контекст backend', '--id', 'ctx-be', '--kind', 'mixed', '--contract-file', b.contract())
+    b.cr('unit', 'be', '--kind', 'backend', '--files', 'backend/app.py', '--context', 'docs/api.md')
+    b.commit('backend/app.py', BODY_T.format(n=1))
+    (b.repo / 'docs/api.md').write_text('API DIRTY DIRTYMARK\n', encoding='utf-8')
+    b.script('codex', [{'text': 'VERDICT: PASS'}, {'text': 'VERDICT: PASS'}])
+    rc, _, err = b.cr('review', 'be')
+    pr = codex_prompts(b)[0].read_text(encoding='utf-8')
+    check('контекст backend: reviewer читает файл из проверяемого коммита, а не из рабочего дерева', rc == 0 and 'CTXMARK' in pr and 'DIRTYMARK' not in pr, err)
+    (b.repo / 'docs/api.md').write_text('API v1 CTXMARK\n', encoding='utf-8')   # рабочее дерево чистое
+    rc, out, _ = b.cr('status')
+    check('контекст backend: пока контекст не менялся, status его не помечает изменившимся', 'контекст ревью: 1 файл' in out and 'ИЗМЕНИЛСЯ' not in out, out)
+    b.commit('docs/api.md', 'API v2 NEWMARK\n', 'контекст изменён после PASS')
+    rc, out, _ = b.cr('finish')
+    check('контекст backend: изменение контекста после PASS обозначено до приёмки, приёмка не подтверждена',
+          rc == 1 and 'Контекст единицы be изменился' in out and 'НЕ ПОДТВЕРЖДЕНА' in out, out)
+    rc, out, _ = b.cr('status')
+    check('контекст backend: status показывает редакцию контекста ревью и факт изменения', 'контекст ревью: 1 файл' in out and 'ИЗМЕНИЛСЯ после ревью: docs/api.md' in out, out)
+    rc, out, err = b.cr('review', 'be')
+    pr2 = codex_prompts(b)[1].read_text(encoding='utf-8')
+    unit = rstate(b)['units']['be']
+    check('контекст backend: новое ревью читает свежий контекст и идёт в полном режиме (от базы единицы), не пустым инкрементом',
+          rc == 0 and 'NEWMARK' in pr2 and f'{unit["base"][:10]}..' in pr2, out + err)
+    rc, out, _ = b.cr('finish')
+    check('контекст backend: после ревью на новой редакции приёмка подтверждена', rc == 0 and 'ACCEPTANCE: VERIFIED' in out, out)
+
+    # --- C. недопустимый контекст останавливает вызов ДО модели и расхода
+    def blocked(label, files, extra, mutate=None, msg=''):
+        x = Proj('ctx-bad', extra=extra)
+        x.cr('start', 'плохой контекст', '--id', 'ctx-bad', '--kind', 'mixed', '--contract-file', x.contract())
+        rc0, _, err0 = x.cr('unit', 'be', '--kind', 'backend', '--files', 'backend/app.py', '--context', *files)
+        x.commit('backend/app.py', BODY_T.format(n=1))
+        if mutate:
+            mutate(x)
+        x.script('codex', [{'text': 'VERDICT: PASS'}])
+        rc, _, err = x.cr('review', 'be')
+        check(f'контекст: {label} отклонён до вызова модели, расход не создан', rc0 == 0 and rc == 2 and msg in err and not x.calls() and not rstate(x)['calls'], (rc0, err0, rc, err))
+    blocked('секрет в содержимом', ['docs/leak.md'], {'docs/leak.md': 'токен sk-' + 'A' * 24 + '\n'}, msg='секрет')
+    blocked('слишком большой файл', ['docs/big.md'], {'docs/big.md': 'x\n' * 21000}, msg='больше')
+    blocked('секретный путь', ['config/secrets/a.txt'], {'config/secrets/a.txt': 'нет\n'}, msg='секретный путь')
+    blocked('файл исчез в проверяемом снимке', ['docs/gone.md'], {'docs/gone.md': 'был\n'},
+            mutate=lambda x: (x.git('rm', '-q', 'docs/gone.md'), x.git('commit', '-q', '-m', 'удалён')), msg='нет в снимке')
+    def bad_bytes(x):
+        (x.repo / 'docs/bin.md').write_bytes(b'\xff\xfe\xfa bad')
+        x.git('add', '-A')
+        x.git('commit', '-q', '-m', 'не UTF-8')
+    blocked('не UTF-8', ['docs/bin.md'], {'docs/bin.md': 'x\n'}, mutate=bad_bytes, msg='не UTF-8')
+
+    # --- D. восстановление: сохранённый запрос и receipt используются как есть, изменение контекста воспроизведению не мешает
+    eng = load_engine()
+    r = Proj('ctx-rec')
+    r.cr('start', 'восстановление контекста', '--id', 'ctx-rec', '--kind', 'backend')
+    os.chdir(r.repo)
+    t = eng.Task(r.repo).load()
+    built = []
+
+    def builder_v1():
+        built.append('v1')
+        return 'PROMPT WITH CONTEXT V1', {'context': [{'path': 'x', 'sha256': 'a' * 64}]}
+
+    def crash(d, prompt):
+        (d / 'raw.txt').write_text('VERDICT: PASS', encoding='utf-8')
+        raise RuntimeError('процесс умер после сохранения ответа')
+
+    try:
+        eng.model_call(t, 'main', 'review', 1, 'codex-review', builder_v1, crash, eng.parse_codex_review, subject={'tip': 'T1'})
+    except RuntimeError:
+        pass
+    t = eng.Task(r.repo).load()
+    relaunched = []
+
+    def builder_v2():
+        built.append('v2')
+        return 'PROMPT WITH CONTEXT V2 (контекст изменился)', None
+
+    res = eng.model_call(t, 'main', 'review', 1, 'codex-review', builder_v2, lambda d, p: relaunched.append(1), eng.parse_codex_review, subject={'tip': 'T1'})
+    saved = (t.dir / 'calls/main-review-1/prompt.txt').read_text(encoding='utf-8')
+    check('контекст: после сбоя готовый ответ читается по сохранённому запросу — новый контекст не строился, повторного вызова нет',
+          res['verdict'] == 'PASS' and built == ['v1'] and not relaunched and saved == 'PROMPT WITH CONTEXT V1', (res, built, relaunched))
+    res2 = eng.model_call(t, 'main', 'review', 1, 'codex-review', builder_v2, lambda d, p: relaunched.append(2), eng.parse_codex_review, subject={'tip': 'T1'})
+    check('контекст: чтение завершённого receipt тоже не перестраивает запрос и не вызывает модель', res2 == res and built == ['v1'] and not relaunched)
+    try:
+        eng.model_call(t, 'main', 'review', 1, 'codex-review', builder_v2, lambda d, p: relaunched.append(3), eng.parse_codex_review, subject={'tip': 'T2'})
+        ok = False
+    except eng.Blocked as e:
+        ok = 'другому снимку' in str(e)
+    check('контекст: тот же вызов с другим снимком (SHA) не принимает чужой receipt', ok and not relaunched)
+    check('контекст: receipt хранит снимок и привязку к сохранённому запросу',
+          json.loads((t.dir / 'calls/main-review-1/receipt.json').read_text(encoding='utf-8'))['subject'] == {'tip': 'T1'})
+
+
+def t_timing():
+    """Измерение времени (1.3.0): раздельно автор/ревью/проверки/ожидание, без двойного учёта, неизвестное не заменяется нулём."""
+    def events(x, uid='main'):
+        f = x.repo / '.ai/task/timing' / f'{uid}.jsonl'
+        return [json.loads(l) for l in f.read_text(encoding='utf-8').splitlines()] if f.exists() else []
+
+    # --- успешный вызов, сводка в status
+    p = Proj('tm-ok')
+    p.cr('start', 'время: успех', '--id', 'tm-ok', '--kind', 'backend')
+    p.script('codex', [{'sleep': 1.2, 'text': 'VERDICT: PASS'}])
+    p.commit('backend/app.py', BODY_T.format(n=1))
+    rc, _, _ = p.cr('review')
+    ev = events(p)
+    start = next(e for e in ev if e['ev'] == 'start' and e['stage'] == 'review')
+    end = next(e for e in ev if e['ev'] == 'end' and e['stage'] == 'review')
+    check('время: успешный вызов — начало, завершение, исход, длительность по монотонным часам и размеры запроса/ответа',
+          rc == 0 and end['outcome'] == 'ok' and end['duration_s'] >= 1.0 and end['response_bytes'] > 0 and start['prompt_bytes'] > 0
+          and end['wall'] >= start['wall'] and start['id'] == end['id'] == 'main:review:1', ev)
+    out = p.cr('status')[1]
+    check('время: status показывает раздельные длительности, оговорку о неизмеряемом и «CLI не сообщил токены»',
+          'Время (измерено, монотонные часы)' in out and 'ревью 1.' in out and '(1×)' in out and 'Не измеряется' in out and 'Токены: CLI их не сообщил' in out
+          and 'байты, не токены' in out, out)
+    check('время: проверки учтены отдельно (контейнер)', any(e['stage'] == 'checks' and e['ev'] == 'end' for e in ev) and 'проверки ' in out, out)
+
+    # --- ошибочный, прерванный
+    q = Proj('tm-err')
+    q.cr('start', 'время: ошибка', '--id', 'tm-err', '--kind', 'backend')
+    q.script('codex', [{'fail': 1}])
+    q.commit('backend/app.py', BODY_T.format(n=1))
+    rc, _, _ = q.cr('review')
+    e = [x for x in events(q) if x['ev'] == 'end' and x['stage'] == 'review']
+    check('время: ошибочный вызов записан с исходом error и длительностью', rc == 2 and len(e) == 1 and e[0]['outcome'] == 'error' and e[0]['duration_s'] >= 0, e)
+    r = Proj('tm-abort')
+    r.cr('start', 'время: таймаут', '--id', 'tm-abort', '--kind', 'backend')
+    r.script('codex', [{'sleep': 30, 'text': 'VERDICT: PASS'}])
+    r.commit('backend/app.py', BODY_T.format(n=1))
+    rc, _, _ = r.cr('review', env={'AQ_TIMEOUT': '2'})
+    e = [x for x in events(r) if x['ev'] == 'end' and x['stage'] == 'review']
+    check('время: прерванный по таймауту вызов записан с исходом aborted, длительность ≈ лимиту', rc == 2 and len(e) == 1 and e[0]['outcome'] == 'aborted' and 1.5 <= e[0]['duration_s'] < 20, e)
+
+    # --- восстановленные: оборванный процесс, чтение receipt, прежнее состояние без журнала
+    s = Proj('tm-rec')
+    s.cr('start', 'время: восстановление', '--id', 'tm-rec', '--kind', 'backend')
+    crash = drive(s, 'def crash(d, prompt):\n    (d / "raw.txt").write_text("VERDICT: PASS", encoding="utf-8"); os._exit(7)\n'
+                     'm.model_call(t, "main", "review", 1, "codex-review", "PROMPT", crash, m.parse_codex_review)\n')
+    res = drive(s, 'r = m.model_call(t, "main", "review", 1, "codex-review", "PROMPT", lambda d, p: print("RELAUNCH"), m.parse_codex_review)\n'
+                   'r = m.model_call(t, "main", "review", 1, "codex-review", "PROMPT", lambda d, p: print("RELAUNCH"), m.parse_codex_review)\n'
+                   'x = m.timing_summary(t)\nprint(r["verdict"], x["stages"]["review"]["n"], x["stages"]["review"]["unknown"], x["stages"]["review"]["sec"], x["recovered"])\n')
+    check('время: оборванный процесс — длительность неизвестна (не 0), восстановление по ответу фиксируется без времени, повторное чтение receipt время не добавляет',
+          crash.returncode == 7 and res.stdout.split() == ['PASS', '0', '1', '0.0', '1'], (crash.stderr, res.stdout, res.stderr))
+    ev = events(s)
+    check('время: у восстановленного вызова есть начало без завершения; чтения ответа (raw, затем receipt) — события recovered без длительности и считаются один раз',
+          [e['ev'] for e in ev] == ['start', 'recovered', 'recovered'] and [e.get('source') for e in ev[1:]] == ['raw', 'receipt']
+          and not any('duration_s' in e for e in ev), ev)
+
+    u = Proj('tm-recok')
+    u.cr('start', 'время: чтение receipt', '--id', 'tm-recok', '--kind', 'backend')
+    u.script('codex', [{'sleep': 1, 'text': 'VERDICT: PASS'}])
+    u.commit('backend/app.py', BODY_T.format(n=1))
+    u.cr('review')
+    before = [e for e in events(u) if e['ev'] == 'end' and e['stage'] == 'review']
+    state_edit(u, lambda st: st['units']['main'].update(verdict=None, reviewed=None, review_applied=0, status='open', open_review=False, last_report=None))
+    rc, _, _ = u.cr('review')
+    after = [e for e in events(u) if e['ev'] == 'end' and e['stage'] == 'review']
+    out = u.cr('status')[1]
+    check('время: чтение receipt после сбоя не создаёт нового вызова и не увеличивает прежнее время генерации',
+          rc == 0 and u.count('codex-review') == 1 and before == after and 'ревью 1.' in out and '(1×)' in out
+          and 'Восстановлено по сохранённому ответу: 1' in out, out)
+    shutil.rmtree(u.repo / '.ai/task/timing')
+    out = u.cr('status')[1]
+    check('время: состояние без журнала времени (прежняя версия) — неизвестное, а не ноль; работа не ломается',
+          'без известной длительности: 1' in out and 'ревью 0.0 с (0×)' in out, out)
+    (u.repo / '.ai/task/timing').write_text('файл вместо каталога', encoding='utf-8')   # метрики не должны влиять на работу
+    u.commit('backend/app.py', BODY_T.format(n=2))
+    u.script('codex', [{'text': 'VERDICT: PASS'}, {'text': 'VERDICT: PASS'}])
+    rc, out, err = u.cr('review')
+    check('время: сбой записи метрик не меняет решение и не блокирует ревью', rc == 0 and 'PASS' in out, out + err)
+
+    # --- ожидание зависимости и пересечение процессов
+    w = Proj('tm-wait')
+    w.cr('start', 'время: ожидание', '--id', 'tm-wait', '--kind', 'mixed', '--contract-file', w.contract())
+    w.cr('unit', 'be', '--kind', 'backend', '--files', 'backend/app.py')
+    w.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES, '--after', 'be')
+    w.script('codex', [{'role': 'author', 'files': FILES_OK1}, {'role': 'review', 'text': 'VERDICT: PASS'}])
+    w.script('claude', [OK])
+    fe = bg(w, 'cycle', 'fe', '--wait', '120', env={'AQ_POLL': '0.2'})
+    time.sleep(2.5)
+    w.commit('backend/app.py', 'def add(a, b):\n    return a + b\n# готово\n')
+    w.cr('review', 'be')
+    rc_fe, out, err = done(fe)
+    wev = [e for e in events(w, 'fe') if e['stage'] == 'wait']
+    out = w.cr('status')[1]
+    check('время: ожидание --after измерено отдельно от работы автора и ревью (≥ 2 с), исход ready',
+          rc_fe == 0 and len(wev) == 1 and wev[0]['duration_s'] >= 2.0 and wev[0]['outcome'] == 'ready' and 'ожидание --after' in out, (wev, out))
+
+    o = Proj('tm-par', extra={'backend/b.py': 'B = 1\n'})
+    o.cr('start', 'время: параллельно', '--id', 'tm-par', '--kind', 'mixed', '--contract-file', o.contract())
+    o.cr('unit', 'u1', '--kind', 'backend', '--files', 'backend/app.py')
+    o.cr('unit', 'u2', '--kind', 'backend', '--files', 'backend/b.py')
+    o.script('codex', [{'sleep': 3, 'text': 'VERDICT: PASS'}, {'sleep': 3, 'text': 'VERDICT: PASS'}])
+    o.commit('backend/app.py', BODY_T.format(n=1))
+    o.commit('backend/b.py', 'B = 2\n')
+    x1, x2 = bg(o, 'review', 'u1'), bg(o, 'review', 'u2')
+    done(x1)
+    done(x2)
+    eng = load_engine()
+    os.chdir(o.repo)
+    sm = eng.timing_summary(eng.Task(o.repo).load())
+    out = o.cr('status')[1]
+    check('время: два пересекающихся процесса — сумма длительностей больше календарного охвата и это названо, а не выдано за elapsed',
+          sm['stages']['review']['n'] == 2 and sm['total'] > sm['span'] + 1 and 'сумма больше календарного времени' in out, (sm, out))
+
+    # --- токены только по данным CLI
+    k = Proj('tm-tok')
+    k.cr('start', 'время: токены', '--id', 'tm-tok', '--kind', 'mixed', '--contract-file', k.contract())
+    k.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    k.script('codex', [{'files': FILES_OK1}])
+    k.script('claude', [OK])
+    (k.fake / 'claude_usage.json').write_text(json.dumps({'input_tokens': 120, 'output_tokens': 30}), encoding='utf-8')
+    rc, _, _ = k.cr('cycle', 'fe')
+    out = k.cr('status')[1]
+    check('время: токены показаны только при фактических данных CLI (вход 120, выход 30); байты токенами не названы',
+          rc == 0 and 'Токены по данным CLI: вход 120, выход 30 (вызовов с данными: 1 из 2)' in out and 'байты, не токены' in out, out)
+
+
 def main():
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding='utf-8', errors='replace')
     for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_task_budget_scope, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links, t_parallel,
-              t_unavailable_and_modes):
+              t_unavailable_and_modes, t_findings, t_context, t_timing):
         try:
             t()
         except Exception as e:  # noqa: BLE001
