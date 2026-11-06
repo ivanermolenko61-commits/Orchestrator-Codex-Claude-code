@@ -2465,11 +2465,121 @@ def t_timing():
           rc == 0 and 'Токены по данным CLI: вход 120, выход 30 (вызовов с данными: 1 из 2)' in out and 'байты, не токены' in out, out)
 
 
+def t_acceptance_regressions():
+    """Регрессии внешней приёмки Codex (раунд 1 по 709edf9)."""
+    # --- пример в блоке с отступом, дубликат ссылки на неизвестный ID, PASS через снятие
+    i = Proj('acc-i')
+    i.cr('start', 'регрессии ID', '--id', 'acc-i', '--kind', 'backend')
+    i.script('codex', [FIX_T,
+                       {'text': 'Пример оформления:\n\n    [ЗАКРЫТО F1] это пример в блоке с отступом\n\nVERDICT: PASS'},
+                       {'text': '[ОСТАЛОСЬ F99] а\n[ОСТАЛОСЬ F99] б\n[ЗАКРЫТО F1] исправлено\nVERDICT: PASS'},
+                       {'text': 'VERDICT: PASS'}])
+    review_n(i, 1)
+    rc, out, _ = review_n(i, 2)
+    u = rstate(i)['units']['main']
+    check('приёмка: пример статуса в блоке с отступом не закрывает ID — F1 открыт, PASS не принят (UNCERTAIN)',
+          rc == 1 and fids(i) == {'F1': 'open'} and u['verdict']['value'] == 'UNCERTAIN' and 'нет статуса: F1' in out, out)
+    rc, out, _ = i.cr('review')
+    u = rstate(i)['units']['main']
+    check('приёмка: дубликат ссылки «ОСТАЛОСЬ» на неизвестный ID — отчёт спорный, PASS не принят; явное закрытие F1 засчитано',
+          rc == 1 and u['verdict']['value'] == 'UNCERTAIN' and u['verdict'].get('integrity') and 'F99: упомянут 2 раза' in out and fids(i) == {'F1': 'closed'}, out)
+    rc, out, _ = i.cr('review')
+    check('приёмка: после устранения спорных меток тот же SHA получает PASS', rc == 0, out)
+
+    j = Proj('acc-j')
+    j.cr('start', 'снятие и PASS', '--id', 'acc-j', '--kind', 'backend')
+    j.script('codex', [FIX_T, {'text': '[СНЯТО F1] замечание ошибочно: требование не относится к этой задаче\nVERDICT: PASS'}])
+    review_n(j, 1)
+    rc, out, _ = review_n(j, 2)
+    u = rstate(j)['units']['main']
+    check('приёмка: PASS через одно лишь снятие допустим, но не прогресс (не исправление): круг без прогресса, F1 снят, не закрыт',
+          rc == 0 and fids(j) == {'F1': 'withdrawn'} and u['rounds'][-1]['progress'] is False and u['stall'] == 1, u['rounds'])
+
+    # --- --continues не переносит PASS на другие требования или состав контекста
+    def prior_pass(label, same):
+        x = Proj(label, extra={'backend/b.py': 'B = 1\n', 'docs/api.md': 'API\n'})
+        spec1, spec2 = x.root / 's1.txt', x.root / 's2.txt'
+        spec1.write_text('требование 1', encoding='utf-8')
+        spec2.write_text('требование 2 (изменено)', encoding='utf-8')
+        x.cr('start', 'перенос PASS', '--id', label + '-1', '--kind', 'mixed', '--contract-file', x.contract())
+        x.cr('unit', 'u1', '--kind', 'backend', '--files', 'backend/app.py', '--spec-file', spec1, '--context', 'docs/api.md')
+        x.cr('unit', 'u2', '--kind', 'backend', '--files', 'backend/b.py')
+        x.script('codex', [{'text': 'VERDICT: PASS'}])
+        x.commit('backend/app.py', BODY_T.format(n=1))
+        rc, _, _ = x.cr('review', 'u1')
+        x.cr('finish', '--abandon')
+        x.cr('start', 'перенос PASS', '--id', label + '-2', '--kind', 'mixed', '--contract-file', x.contract(), '--continues', label + '-1')
+        args = ['--spec-file', spec1 if same else spec2, '--context', 'docs/api.md']
+        rc2, _, err = x.cr('unit', 'u1', '--kind', 'backend', '--files', 'backend/app.py', *args)
+        return rc, rc2, err, rstate(x)['units']['u1']
+    rc, rc2, err, u1 = prior_pass('acc-ra', True)
+    check('приёмка: те же требования и контекст — прежний PASS переносится при --continues (принятый неизменённый результат не ревьюится заново)',
+          rc == 0 and rc2 == 0 and u1['status'] == 'accepted' and u1['verdict'] and u1['verdict'].get('requirements'), (err, u1['status']))
+    rc, rc2, err, u1 = prior_pass('acc-rb', False)
+    check('приёмка: изменённая спецификация при --continues — прежний PASS не переносится, единица требует нового ревью',
+          rc == 0 and rc2 == 0 and u1['status'] != 'accepted' and not u1['verdict'] and 'прежний PASS не переносится' in err, (err, u1['status']))
+
+    # --- влитый frontend: изменение контекста после интеграции не даёт молчаливой приёмки
+    f = Proj('acc-fe', extra={'docs/api.md': 'API v1\n'})
+    f.cr('start', 'контекст после интеграции', '--id', 'acc-fe', '--kind', 'mixed', '--contract-file', f.contract())
+    f.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES, '--context', 'docs/api.md')
+    f.script('codex', [{'files': FILES_OK1}])
+    f.script('claude', [OK])
+    f.cr('cycle', 'fe')
+    rc, _, err = f.cr('integrate', 'fe')
+    f.commit('docs/api.md', 'API v2 несовместимо\n', 'контекст изменён после интеграции')
+    rc_f, out, _ = f.cr('finish')
+    check('приёмка: контекст влитого frontend изменился после PASS — приёмка не подтверждена, причина и решение Ивана названы',
+          rc == 0 and rc_f == 1 and 'Контекст единицы fe изменился' in out and 'уже влита' in out and 'НЕ ПОДТВЕРЖДЕНА' in out, out + err)
+
+    # --- совместимость с receipt и резервом прежней версии (нет subject): ответ читается, нового вызова нет
+    def legacy(label, drop_receipt):
+        x = Proj(label)
+        x.cr('start', 'прежний receipt', '--id', label, '--kind', 'backend')
+        x.script('codex', [{'text': 'VERDICT: PASS'}])
+        x.commit('backend/app.py', BODY_T.format(n=1))
+        rc, _, _ = x.cr('review')
+        d = x.repo / '.ai/task/calls/main-review-1'
+        rec = json.loads((d / 'receipt.json').read_text(encoding='utf-8'))
+        rec.pop('subject', None)
+        old_text = '\n'.join(l for l in (d / 'prompt.txt').read_text(encoding='utf-8').split('\n') if not l.startswith('Редакция требований'))
+        (d / 'prompt.txt').write_text(old_text, encoding='utf-8', newline='')   # запрос версии 1.2.0: строки о редакции требований не было
+        rec['binding'] = hashlib.sha256(('codex-review\0' + old_text).encode('utf-8')).hexdigest()
+        if drop_receipt:
+            (d / 'receipt.json').unlink()
+        else:
+            (d / 'receipt.json').write_text(json.dumps(rec), encoding='utf-8')
+
+        def old(st):
+            st['calls']['main:review:1'].pop('subject', None)
+            st['calls']['main:review:1'].pop('context', None)
+            st['units']['main'].update(verdict=None, reviewed=None, review_applied=0, status='open', open_review=False, last_report=None)
+        state_edit(x, old)
+        rc2, out, err = x.cr('review')
+        return rc, rc2, x.count('codex-review'), out + err
+    rc, rc2, n, msg = legacy('acc-lr', False)
+    check('приёмка: receipt прежней версии (без subject) читается по сохранённому запросу — нового вызова нет', rc == 0 and rc2 == 0 and n == 1, msg)
+    rc, rc2, n, msg = legacy('acc-lw', True)
+    check('приёмка: вызов прежней версии с готовым ответом, но без receipt, восстанавливается без нового вызова', rc == 0 and rc2 == 0 and n == 1, msg)
+
+    # --- прерванное ожидание зависимости попадает в метрики
+    w = Proj('acc-wait')
+    w.cr('start', 'прерванное ожидание', '--id', 'acc-wait', '--kind', 'mixed', '--contract-file', w.contract())
+    w.cr('unit', 'be', '--kind', 'backend', '--files', 'backend/app.py')
+    w.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES, '--after', 'be')
+    res = drive(w, 'import time\ndef boom(x):\n    raise KeyboardInterrupt\ntime.sleep = boom\n'
+                   'try:\n    m.wait_deps(t, "fe", 30)\nexcept KeyboardInterrupt:\n    print("INT")\n')
+    f_ = w.repo / '.ai/task/timing/fe.jsonl'
+    ev = [json.loads(l) for l in f_.read_text(encoding='utf-8').splitlines()] if f_.exists() else []
+    check('приёмка: прерванное ожидание --after записано с исходом aborted и измеренной длительностью',
+          res.stdout.split() == ['INT'] and len(ev) == 1 and ev[0]['stage'] == 'wait' and ev[0]['outcome'] == 'aborted' and ev[0]['duration_s'] >= 0, (res.stdout, res.stderr, ev))
+
+
 def main():
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding='utf-8', errors='replace')
     for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_task_budget_scope, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links, t_parallel,
-              t_unavailable_and_modes, t_findings, t_context, t_timing):
+              t_unavailable_and_modes, t_findings, t_context, t_timing, t_acceptance_regressions):
         try:
             t()
         except Exception as e:  # noqa: BLE001

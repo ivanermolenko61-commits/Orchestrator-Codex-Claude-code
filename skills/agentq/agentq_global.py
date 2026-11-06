@@ -727,10 +727,16 @@ def carry_unit(task, uid, u):
     if mine.get('value') == 'PASS':   # принятый и с тех пор не менявшийся результат остаётся принятым: ревью модели не повторяется (проверки — CR checks без модели)
         spec = u['files'] or ['.', *[f':(exclude){f}' for f in other_owned(task, uid) + u['carried_exclude'] + [f for k, o in meta.items() if k != uid for f in o.get('files') or []]]]
         # файлы других прежних единиц ещё могут быть созданы заново; если нет, finish перепроверит область и потребует ревью
-        if git(root, 'merge-base', '--is-ancestor', mine['sha'], 'HEAD', check=False).returncode == 0 \
+        req = mine.get('requirements')   # редакция требований и состав контекста, для которых получен PASS (вердикт прежней версии — без записи)
+        same_req = not req or (req.get('contract_sha256') == sha(task.s['contract']) and req.get('spec_sha256') == sha(u['spec'])
+                               and sorted(e['path'] for e in mine.get('context') or []) == sorted(u['context']))
+        if not same_req:
+            warn(f'{uid}: контракт, спецификация или состав контекста изменились — прежний PASS не переносится, нужно новое ревью')
+        if same_req and git(root, 'merge-base', '--is-ancestor', mine['sha'], 'HEAD', check=False).returncode == 0 \
                 and git(root, 'diff', '--no-ext-diff', '--quiet', mine['sha'], 'HEAD', '--', *spec, check=False).returncode == 0:
             u['verdict'], u['reviewed'], u['status'] = {'sha': mine['sha'], 'value': 'PASS', 'n': 0,
-                                                        **({'context': mine['context']} if mine.get('context') else {})}, mine['sha'], 'accepted'
+                                                        **({'context': mine['context']} if mine.get('context') else {}),
+                                                        **({'requirements': req} if req else {})}, mine['sha'], 'accepted'
             if u['kind'] == 'frontend':   # интегрированный кандидат уже в истории ветки: автор и ревью повторно не вызываются
                 u['candidate'], u['status'] = mine['sha'], 'integrated'
 
@@ -802,14 +808,14 @@ def record_round(task, uid, sha_, progress, why):
 # ---------------------------------------------------------------- реестр существенных замечаний: постоянные ID в пределах единицы
 
 def iter_report_lines(text):
-    """Строки отчёта вне блоков кода и цитат: метки статусов внутри них не учитываются."""
+    """Строки отчёта вне блоков кода (в ограждении и с отступом ≥4 пробелов) и цитат: метки статусов внутри них не учитываются."""
     fence = False
     for line in text.splitlines():
         s = line.strip()
         if s.startswith(('```', '~~~')):
             fence = not fence
             continue
-        if not fence and not s.startswith('>'):
+        if not fence and not s.startswith('>') and not line.startswith(('    ', '\t')):   # блок с отступом — код/пример, не метка
             yield line
 
 
@@ -897,6 +903,7 @@ def apply_review(u, parsed, value, tip, n):
         rec = f.get(fid)
         if len(items) > 1:
             diag.append(f'{fid}: упомянут {len(items)} раза ({", ".join(STATUS_RU[s] for s, _ in items)}) — ни одно утверждение не засчитано')
+            suspect = True   # противоречивая или дублированная ссылка (в том числе на неизвестный ID) не допускает PASS
             continue
         st, note = items[0]
         if rec is None:
@@ -1203,12 +1210,13 @@ def pid_alive(pid):
         return False
 
 
-def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None):
+def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None, legacy_ok=None):
     """Единственный путь к модели. Резерв бюджета сохраняется ДО запуска и не возвращается.
     receipt привязан к точному тексту запроса; готовый ответ после сбоя читается без нового вызова.
     prompt — текст либо функция, строящая (текст, метаданные) только для нового запроса. subject — снимок, к которому относится вызов (SHA, режим):
     при его совпадении сохранённый запрос и receipt используются как есть, поэтому изменение внешнего контекста после сбоя воспроизведению не
-    мешает, а ответ не может быть отнесён к другому SHA. Без subject (прямые вызовы, вызовы прежних версий) запрос строится заново и сверяется."""
+    мешает, а ответ не может быть отнесён к другому SHA. Вызовы прежних версий (без subject): сохранённый запрос принимается, если он целиком
+    соответствует receipt и legacy_ok(текст) подтверждает его снимок; иначе, как и в прямых вызовах без subject, запрос строится заново и сверяется."""
     key = f'{uid}:{role}:{n}'
     d = task.dir / 'calls' / key.replace(':', '-')
     rec, raw, saved = d / 'receipt.json', d / 'raw.txt', d / 'prompt.txt'
@@ -1226,6 +1234,8 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None)
         if subject is not None and r.get('subject') is not None:
             need(r['subject'] == subject, f'{key}: сохранённый ответ относится к другому снимку ({r["subject"]}) — вызов не повторяется')
             need(saved.exists() and r['binding'] == sha(kind + '\0' + saved_text()), f'{key}: сохранённый запрос не соответствует receipt — вызов не повторяется')
+        elif legacy_ok is not None and saved.exists() and r['binding'] == sha(kind + '\0' + saved_text()) and legacy_ok(saved_text()):
+            pass   # receipt прежней версии: точный сохранённый запрос относится к тому же снимку — результат читается без нового вызова
         else:
             need(r['binding'] == sha(kind + '\0' + build()[0]), f'{key}: запрос изменился после сохранённого ответа (binding mismatch) — вызов не повторяется')
         tlog(task, uid, ev='recovered', stage=role, id=key, source='receipt')
@@ -1235,6 +1245,8 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None)
         if subject is not None and c.get('subject') is not None:
             need(c['subject'] == subject and saved.exists(), f'{key}: прерванный/неопределённый вызов относится к другому снимку — повтор запрещён, см. {d}')
             text = saved_text()
+        elif legacy_ok is not None and saved.exists() and legacy_ok(saved_text()):
+            text = saved_text()   # вызов прежней версии: сохранённый запрос относится к тому же снимку
         else:
             text = build()[0]
             need(saved.exists() and saved_text() == text, f'{key}: прерванный/неопределённый вызов с другим запросом — повтор запрещён, см. {d}')
@@ -1985,14 +1997,16 @@ def unmet_deps(task, uid):
 
 def wait_deps(task, uid, wait):
     """Ожидание готовности зависимостей без вызовов моделей и расхода. Не дождались — claim остановит с кодом 5 (WAIT)."""
-    deadline, t0, waited = time.time() + (wait or 0), time.monotonic(), False
-    while unmet_deps(task, uid) and time.time() < deadline:
-        waited = True
-        time.sleep(float(os.environ.get('AQ_POLL', '2')))
-        task.sync()
-    if waited:   # фактическое ожидание зависимости; мгновенная готовность в сводку времени не попадает
-        tlog(task, uid, ev='end', stage='wait', id=f'wait:{os.urandom(3).hex()}', duration_s=round(time.monotonic() - t0, 3),
-             outcome='timeout' if unmet_deps(task, uid) else 'ready')
+    deadline, t0, waited, outcome = time.time() + (wait or 0), time.monotonic(), False, 'aborted'
+    try:
+        while unmet_deps(task, uid) and time.time() < deadline:
+            waited = True
+            time.sleep(float(os.environ.get('AQ_POLL', '2')))
+            task.sync()
+        outcome = 'timeout' if unmet_deps(task, uid) else 'ready'
+    finally:
+        if waited:   # фактическое ожидание зависимости (в том числе прерванное); мгновенная готовность в сводку времени не попадает
+            tlog(task, uid, ev='end', stage='wait', id=f'wait:{os.urandom(3).hex()}', duration_s=round(time.monotonic() - t0, 3), outcome=outcome)
 
 
 def claim(task, uid):
@@ -2158,7 +2172,7 @@ def do_author(task, uid, effort, wait=0):
     ensure_registry(task, uid)
     res = model_call(task, uid, 'author', n, 'codex-author',
                      lambda: build_author_prompt(task, uid, n, feedback_for(u) if u['candidate'] else carried_text(u)),
-                     launch_codex_author(effort, u['files']), parse_author(u['files']), subject={'base': expected})
+                     launch_codex_author(effort, u['files']), parse_author(u['files']), subject={'base': expected}, legacy_ok=lambda t: True)
     validate_and_write(task, uid, res, n)
     accept_author(task, uid, res, n, git(wt, 'rev-parse', 'HEAD'))
     say(f'Автор Codex ({MODEL}/{effort}), раунд {n}: кандидат {u["candidate"][:10]}. {res["notes"][:300]}')
@@ -2296,11 +2310,12 @@ def do_review(task, uid, effort, full):
         return review_prompt(task, uid, n, 'full' if full_mode else 'incremental', frm, tip, diff, fe, ctx), context_meta(task, uid, ctx)
 
     subject = {'tip': tip, 'from': frm, 'full': full_mode}
+    legacy_ok = lambda t: f'{frm[:10]}..{tip[:10]}' in t   # запрос прежней версии содержит диапазон «от..до»
     if fe:
-        res = model_call(task, uid, 'review', n, 'claude-review', build, launch_claude_review(effort), parse_claude_review, subject=subject)
+        res = model_call(task, uid, 'review', n, 'claude-review', build, launch_claude_review(effort), parse_claude_review, subject=subject, legacy_ok=legacy_ok)
         who = 'Claude opus (свежий контекст)'
     else:
-        res = model_call(task, uid, 'review', n, 'codex-review', build, launch_codex_review(effort), parse_codex_review, subject=subject)
+        res = model_call(task, uid, 'review', n, 'codex-review', build, launch_codex_review(effort), parse_codex_review, subject=subject, legacy_ok=legacy_ok)
         who = f'Codex {MODEL}'
     value, report = res['verdict'], res['report']
     structured = (res.get('structured') or {}).get('findings') or []
@@ -2316,8 +2331,10 @@ def do_review(task, uid, effort, full):
     engine_note = findings_note(u, ap, n)
     out = task.dir.parent / 'reviews' / f'{time.strftime("%Y%m%d-%H%M%S")}-{uid}-r{n}.md'
     wtext(out, report + engine_note)
-    ctx_meta = (task.s['calls'].get(f'{uid}:review:{n}') or {}).get('context')
-    u['verdict'] = {'sha': tip, 'value': value, 'n': n, **({'context': ctx_meta} if ctx_meta else {}), **({'integrity': True} if ap['integrity'] else {})}
+    call = task.s['calls'].get(f'{uid}:review:{n}') or {}
+    ctx_meta, req_meta = call.get('context'), call.get('requirements')
+    u['verdict'] = {'sha': tip, 'value': value, 'n': n, **({'context': ctx_meta} if ctx_meta else {}), **({'requirements': req_meta} if req_meta else {}),
+                    **({'integrity': True} if ap['integrity'] else {})}
     u['reviewed'], u['last_report'], u['review_applied'] = tip, str(out), n
     note = ''
     if u['open_review']:   # повторное ревью: прогресс — закрытые прежние ID этой единицы (подтверждённые движком), а не слова в отчёте
@@ -2327,7 +2344,7 @@ def do_review(task, uid, effort, full):
         if last.get('sha') == tip and last.get('progress') and 'исправлены падавшие проверки' in last.get('why', '') and u['progress'] is True:
             last['why'] += f'; ревью {value}, закрыто прежних замечаний: {closed}{detail}'   # круг этого кандидата уже засчитан по проверкам
         else:
-            record_round(task, uid, tip, value == 'PASS' or closed > 0, f'ревью {value}, закрыто прежних замечаний: {closed}{detail}')
+            record_round(task, uid, tip, closed > 0 or (value == 'PASS' and not ap['withdrawn']), f'ревью {value}, закрыто прежних замечаний: {closed}{detail}')
         note = (f'\nПрогресс круга: закрыто прежних замечаний {closed}{detail}' if u['progress'] else
                 f'\nКРУГ БЕЗ ПРОГРЕССА ({u["stall"]} подряд): прежние замечания не закрыты')
     u['open_review'] = value != 'PASS'
@@ -2540,8 +2557,8 @@ def accepted(task, uid):
         return False
     if stale_carried(task, uid, 'HEAD'):
         return False   # исключённые файлы прежних принятых единиц изменены без своей единицы
-    if u['kind'] != 'frontend' and context_drift(task, uid, 'HEAD'):
-        return False   # PASS получен для другой редакции контекста: нужно ревью на текущем SHA (frontend проверяется при integrate)
+    if context_drift(task, uid, 'HEAD'):
+        return False   # PASS получен для другой редакции контекста: приёмка не подтверждается (backend — новое ревью; влитый frontend — решение Ивана)
     return git(root, 'diff', '--no-ext-diff', '--quiet', f'{sha_ok}..HEAD', '--', *spec, check=False).returncode == 0
 
 
@@ -2588,11 +2605,13 @@ def cmd_finish(a):
     else:
         no_pass = [k for k, v in acc.items() if not v]
         no_chk = [k for k, v in how.items() if not v and acc[k]]
-        drifted = {k: context_drift(t, k, 'HEAD') for k in no_pass if t.unit(k)['kind'] != 'frontend' and t.unit(k)['verdict']}
+        drifted = {k: context_drift(t, k, 'HEAD') for k in no_pass if t.unit(k)['verdict']}
         for k, files in drifted.items():
             if files:
-                say(f'Контекст единицы {k} изменился после её PASS ({", ".join(files)}): PASS относится к прежней редакции контекста — '
-                    f'нужно ревью на текущем SHA: review {k} (режим полного ревью выбирается автоматически).')
+                say(f'Контекст единицы {k} изменился после её PASS ({", ".join(files)}): PASS относится к прежней редакции контекста — ' +
+                    (f'нужно ревью на текущем SHA: review {k} (режим полного ревью выбирается автоматически).' if t.unit(k)['kind'] != 'frontend' else
+                     'единица уже влита, её кандидат не пересматривается: решение Ивана — принять остаток как известное ограничение '
+                     '(finish --abandon) либо проверить совместимость отдельной задачей (start --new-work).'))
         say('Приёмка: НЕ ПОДТВЕРЖДЕНА.' + (f' Нет независимого PASS на текущем SHA: {", ".join(no_pass)}.' if no_pass else '') +
             (f' Независимый PASS есть, но нет успешных механических проверок на принятом SHA или обоснования их неприменимости: {", ".join(no_chk)} — '
              'статическое ревью их не заменяет: CR checks <uid> (или CR waive <uid> "<причина>" — только если проверок в доверенной конфигурации нет).' if no_chk else ''))
@@ -2609,7 +2628,8 @@ def cmd_finish(a):
                     'inherited_calls': t.s.get('inherited', {}).get('calls', 0),
                     'max_calls': t.s['budget'].get('hard'),
                     'verdicts': {k: {'value': u['verdict']['value'], 'sha': u['verdict']['sha'],
-                                     **({'context': u['verdict']['context']} if u['verdict'].get('context') else {})}
+                                     **({'context': u['verdict']['context']} if u['verdict'].get('context') else {}),
+                                     **({'requirements': u['verdict']['requirements']} if u['verdict'].get('requirements') else {})}
                                  for k, u in t.s['units'].items() if u['verdict']},
                     'unit_meta': {k: {'kind': u['kind'], 'files': u['files'], 'base': u['review_base'] or u['base'],
                                       'last_report': u['last_report'] or u['carried_report'], 'stall': u['stall'],
