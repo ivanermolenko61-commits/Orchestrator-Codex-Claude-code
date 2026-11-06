@@ -93,8 +93,8 @@
       "git_blob": "cb0ab9fbe888925f8d53cd716d714841454bb898"
     },
     "skills/agentq/selftest.py": {
-      "sha256": "ca0cc9c5f60424fdfc14a434a63f3c5f133190b52ae3ea39f8efc379c0fe7917",
-      "git_blob": "e53d8171e917be40c8de2e87952fbc758338f2b1"
+      "sha256": "168bdedd233adef7b7a724747d0eedacdcce8f6b15b2c2badf40bb192c601b95",
+      "git_blob": "7d677f72e35d5902e38bf6ed501f6a1adbf50953"
     },
     "skills/agentq/SKILL.md": {
       "sha256": "45b7916d8b13414faf84f41f0d7333efd5238b5f78d42f4312ffc7973b65dcae",

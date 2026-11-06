@@ -1698,7 +1698,13 @@ def t_cont_i():
     c.cr('review')
     review_n(c, 3)
     n0 = c.count('codex-review')
-    state_edit(c, lambda s: s['units']['main'].update(prev))   # прерывание после засчитанного круга по проверкам, до применения вердикта ревью
+    def interrupted(s):   # прерывание после засчитанного круга по проверкам, до применения вердикта ревью: объединение и вердикт сохраняются одной записью
+        u = s['units']['main']
+        u.update(prev)
+        last = u['rounds'][-1]
+        last.pop('review_merged', None)
+        last['why'] = 'исправлены падавшие проверки'
+    state_edit(c, interrupted)
     rc, _, err = c.cr('review')
     m = rstate(c)['units']['main']
     check('I: после прерывания круг по исправленным проверкам не заменяется «без прогресса» результатом ревью того же кандидата',
