@@ -677,6 +677,20 @@ def same_work(kind, files, m):
     return family(kind) == family(m['kind'])
 
 
+def legacy_credited(root, entry, uid, verdict):
+    """Зачтённые SHA единицы из записи журнала прежней версии (списка credited в ней нет): по кругам архивного состояния задачи. Если архива
+    нет, восстановить историю нельзя — осторожно считаем зачтённым кандидата последнего вердикта (повторного зачёта он не получит)."""
+    for d in sorted((Path(root) / '.ai/done').glob(f'*-{entry["id"]}')):
+        try:
+            su = json.loads((d / 'state.json').read_text(encoding='utf-8'))['units'][uid]
+            return {r['sha'] for r in su.get('rounds') or [] if r.get('progress') is True} | set(su.get('credited') or [])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    warn(f'{uid}: в записи {entry["id"]} прежней версии нет списка зачтённых SHA, архив состояния недоступен — история прогресса восстановлена '
+         'неполно: зачтённым считается кандидат последнего вердикта')
+    return {verdict['sha']} if verdict and verdict.get('sha') else set()
+
+
 def carry_unit(task, uid, u):
     """Единица продолжения (--continues) продолжает прежнюю работу только под тем же uid и в том же семействе ролей. Переименование,
     объединение нескольких прежних единиц и смена семейства не поддерживаются — понятный отказ до создания единицы: иначе расход, история
@@ -713,12 +727,6 @@ def carry_unit(task, uid, u):
     u['open_checks'] = bool(m.get('open_checks'))
     u['findings'], u['finding_seq'] = copy.deepcopy(m.get('findings') or {}), m.get('finding_seq', 0)   # ID и статусы переходят вместе с расходом
     u['credited'] = list(m.get('credited') or [])   # зачтённые SHA переходят по цепочке: прогресс одного кандидата не начисляется заново
-    if 'credited' not in m and m.get('progress') is True:   # запись прежней версии без списка: последний засчитанный кандидат — тот, на котором получен вердикт
-        legacy = (verdicts.get(uid) or {}).get('sha')
-        if legacy:
-            u['credited'].append(legacy)
-        else:
-            warn(f'{uid}: в записи прежней версии нет списка зачтённых SHA и вердикта — какой кандидат уже получил зачёт прогресса, восстановить нельзя')
     u['findings_imported'] = m.get('findings_imported')   # запись без реестра (прежняя версия): импорт из отчёта при первом вызове, см. ensure_registry
     mine = verdicts.get(uid) or {}
     u['open_review'] = mine.get('value') not in (None, 'PASS')
@@ -1671,6 +1679,8 @@ def cmd_start(a):
                         cur.update({k: m[k] for k in ('kind', 'files', 'last_report') if m.get(k)})
                         cur.update({k: m[k] for k in ('stall', 'progress', 'rethinks', 'open_checks', 'findings', 'finding_seq', 'findings_imported', 'credited')
                                     if k in m})   # история прогресса и реестр замечаний — последние (реестр более поздней задачи включает прежний)
+                        if 'credited' not in m:   # запись прежней версии без списка зачтённых SHA
+                            cur['credited'] = sorted(set(cur.get('credited') or []) | legacy_credited(root, e, uid, (e.get('verdicts') or {}).get(uid)))
                     for uid, vd in (e.get('verdicts') or {}).items():   # последний вердикт: открытые замечания и принятые файлы
                         inh['verdicts'][uid] = vd
                     if e.get('max_calls'):   # предел Ивана действует на всю цепочку, продолжение его не поднимает

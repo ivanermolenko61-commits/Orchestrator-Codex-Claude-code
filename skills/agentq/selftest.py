@@ -2663,6 +2663,33 @@ def t_acceptance_regressions():
     check('приёмка: запись журнала без списка зачтённых SHA — кандидат вердикта считается зачтённым, закрытие остального ID прогресса не добавляет',
           rc10 == 0 and len(carried10) == 1 and fids(r10) == {'F1': 'closed', 'F2': 'closed'} and u['rounds'][-1]['progress'] is False, (rc10, carried10, u['rounds']))
 
+    # --- журнал прежней версии: зачтённый кандидат восстанавливается и когда последний круг был по другому кандидату (красные проверки)
+    for tag, drop_archive in (('acc-r11', False), ('acc-r12', True)):
+        r11 = Proj(tag)
+        r11.cr('start', 'прежний журнал и красные проверки', '--id', tag, '--kind', 'backend')
+        r11.script('codex', [{'text': '- [MAJOR] [НОВОЕ] backend/app.py:2 — A.\n- [MAJOR] [НОВОЕ] backend/app.py:3 — B.\nVERDICT: FIX'},
+                             {'text': '[ЗАКРЫТО F1] исправлено\nVERDICT: PASS'}, {'text': '[ЗАКРЫТО F2] исправлено\nVERDICT: PASS'}])
+        review_n(r11, 1)
+        review_n(r11, 2)
+        sha_b = r11.git('rev-parse', 'HEAD')
+        r11.commit('backend/app.py', 'def add(a, b):\n    return a + b  # FAIL_test C\n')
+        r11.cr('review')
+        r11.cr('finish', '--abandon')
+        led = rledger(r11)
+        del led[-1]['unit_meta']['main']['credited']   # запись 1.2.0 / промежуточной сборки
+        (r11.repo / '.ai/ledger.json').write_text(json.dumps(led), encoding='utf-8')
+        if drop_archive:
+            for d in (r11.repo / '.ai/done').glob('*'):
+                shutil.rmtree(d)
+        r11.cr('start', 'прежний журнал и красные проверки', '--id', tag + 'b', '--kind', 'backend', '--continues', tag)
+        carried11 = rstate(r11)['units']['main']['credited']
+        r11.git('reset', '--hard', sha_b)
+        rc11, _, _ = r11.cr('review')
+        u = rstate(r11)['units']['main']
+        check(f'приёмка: журнал без списка зачтённых SHA ({"архива состояния нет — по вердикту" if drop_archive else "по архиву состояния"}) — возврат на B после красных проверок C не даёт второго зачёта',
+              carried11 == [sha_b] and rc11 == 3 and [r['progress'] for r in u['rounds'] if r['sha'] == sha_b] == [False]
+              and 'уже засчитан' in u['rounds'][-1]['why'], (rc11, carried11, sha_b, u['rounds']))   # два круга без прогресса — остановка, а не второй зачёт B
+
     # --- влитый frontend: изменение контекста после интеграции не даёт молчаливой приёмки
     f = Proj('acc-fe', extra={'docs/api.md': 'API v1\n'})
     f.cr('start', 'контекст после интеграции', '--id', 'acc-fe', '--kind', 'mixed', '--contract-file', f.contract())

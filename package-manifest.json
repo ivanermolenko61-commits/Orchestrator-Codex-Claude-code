@@ -69,8 +69,8 @@
       "git_blob": "60d1b412a46d37040649119db4d24ee0f3bf76d9"
     },
     "README.md": {
-      "sha256": "d48ac2e1952329a8cc04c25743af282dc2a22318814a184415c741760a21d90d",
-      "git_blob": "75de7f66f4ddf238fcd7d0cd3ad05c6d98aabd63"
+      "sha256": "cde398f90f62a0e410eed524657a98c541a3aee3848bb4a5d1eea10a127473f4",
+      "git_blob": "9f28025789069284ed495bcef245d7de1633a4d7"
     },
     "scripts/install-global.sh": {
       "sha256": "b66806667f561d4ceda10d6fe017bf767bc217c2da46c62d4a6978473046cb6b",
@@ -85,16 +85,16 @@
       "git_blob": "f5683b1af358ca61e9600f4b4547af176ca18d38"
     },
     "skills/agentq/agentq_global.py": {
-      "sha256": "a44c8c35de43f6095d82b8bc7d5d1a2117a8b86774e86d86218a710b208e354c",
-      "git_blob": "76c9d23bf848f5fa62f088c0ddab5b49e7ac8132"
+      "sha256": "d201e6504875751cda80d0570bb077b8cf4aaad179c17303c749e25bbd35df05",
+      "git_blob": "d3624aebcb2b3365cf4b425db2575bb6abdf3f6f"
     },
     "skills/agentq/codex-review.sh": {
       "sha256": "c78dc298bb0520f6c4c76b60133b3628d715e1db9947ed4ccb2a245a49ae4a3e",
       "git_blob": "cb0ab9fbe888925f8d53cd716d714841454bb898"
     },
     "skills/agentq/selftest.py": {
-      "sha256": "1e92c72c65396ab9e3d640e7b79aa60e76a02eed5133f4ef17adb2a38df988aa",
-      "git_blob": "41214c6cafa52eb2e49ff9e1c04619bd36c43144"
+      "sha256": "e9a62a821b232d4fdf26cf90207a6a540e807c79229c0bc29b90f826cd3add0a",
+      "git_blob": "e630894f9f19ef74f463c2673744b1096ac2c102"
     },
     "skills/agentq/SKILL.md": {
       "sha256": "45b7916d8b13414faf84f41f0d7333efd5238b5f78d42f4312ffc7973b65dcae",
