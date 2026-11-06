@@ -2565,6 +2565,20 @@ def t_acceptance_regressions():
     check('приёмка: запрос изменён после резерва — восстановление остановлено, receipt не создан, вызова нет',
           rc == 2 and 'записи резерва' in err and not (d / 'receipt.json').exists() and c.count('codex-review') == 1, err)
 
+    # --- исправленные проверки засчитываются один раз; повторные неоднозначные ревью того же SHA прогресса не дают и приводят к остановке
+    r5 = Proj('acc-r5')
+    r5.cr('start', 'повторы после проверок', '--id', 'acc-r5', '--kind', 'backend')
+    r5.script('codex', [FIX_T] + [{'text': 'VERDICT: PASS'}] * 8)
+    review_n(r5, 1)
+    r5.commit('backend/app.py', 'def add(a, b):\n    return a + b  # FAIL_test\n')
+    rc_red, _, _ = r5.cr('review')
+    r5.commit('backend/app.py', 'def add(a, b):\n    return a + b  # исправлено\n')
+    codes = [r5.cr('review')[0] for _ in range(5)]
+    u = rstate(r5)['units']['main']
+    check('приёмка: исправление проверок засчитано один раз, повторные неоднозначные ревью того же SHA прогресса не дают — остановка по контрольной точке (код 3)',
+          rc_red == 1 and codes[:2] == [1, 1] and 3 in codes and r5.count('codex-review') == 3 and u['rounds'][1]['review_merged'] is True
+          and [r['progress'] for r in u['rounds']][:3] == [False, True, False], (rc_red, codes, r5.count('codex-review'), u['rounds']))
+
     # --- влитый frontend: изменение контекста после интеграции не даёт молчаливой приёмки
     f = Proj('acc-fe', extra={'docs/api.md': 'API v1\n'})
     f.cr('start', 'контекст после интеграции', '--id', 'acc-fe', '--kind', 'mixed', '--contract-file', f.contract())

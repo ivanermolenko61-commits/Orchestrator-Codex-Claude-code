@@ -2357,8 +2357,10 @@ def do_review(task, uid, effort, full):
         detail = (f' ({", ".join(ap["closed"])})' if closed else '') + (f'; снято как ошибочное (не прогресс): {", ".join(ap["withdrawn"])}' if ap['withdrawn'] else '')
         last = u['rounds'][-1] if u['rounds'] else {}
         repeat = any(r['sha'] == tip for r in u['rounds'])   # тот же SHA уже оценён: PASS без новых закрытых ID прогресса не добавляет
-        if last.get('sha') == tip and last.get('progress') and 'исправлены падавшие проверки' in last.get('why', '') and u['progress'] is True:
+        if (last.get('sha') == tip and last.get('progress') and 'исправлены падавшие проверки' in last.get('why', '') and u['progress'] is True
+                and not last.get('review_merged')):   # объединение с проверками — только с ПЕРВЫМ ревью кандидата; повторы считаются отдельными кругами
             last['why'] += f'; ревью {value}, закрыто прежних замечаний: {closed}{detail}'   # круг этого кандидата уже засчитан по проверкам
+            last['review_merged'] = True
         else:
             record_round(task, uid, tip, closed > 0 or (value == 'PASS' and not repeat and not any(x['status'] == 'withdrawn' for x in u['findings'].values())),
                          f'ревью {value}, закрыто прежних замечаний: {closed}{detail}')
