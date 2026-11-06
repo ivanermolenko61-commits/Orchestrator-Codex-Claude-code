@@ -1984,7 +1984,7 @@ def t_parallel():
     k.cr('unit', 'be', '--kind', 'backend', '--files', 'backend/app.py')
     k.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
     k.commit('backend/app.py', 'def add(a, b):\n    return a + b\n# k\n')
-    k.script('codex', [{'role': 'author', 'files': FILES_OK1, 'sleep': 6}])
+    k.script('codex', [{'role': 'author', 'files': FILES_OK1, 'sleep': 12}])
     fe = bg(k, 'cycle', 'fe')
     until(lambda: any(c.startswith('fe:author') for c in rstate(k)['calls']))
     crash = drive(k, 'def crash(d, prompt):\n    (d / "raw.txt").write_text("- [MINOR] x — y.\\nVERDICT: PASS", encoding="utf-8"); os._exit(7)\n'
@@ -2000,7 +2000,7 @@ def t_parallel():
           res.stdout.split() == ['PASS'] and set(st['calls']) == {'fe:author:1', 'be:review:1'} and len(st['calls']) == n_before, (res.stdout, res.stderr, list(st['calls'])))
     rc, _, err = k.cr('cycle', 'fe')
     check('parallel: пока процесс прерванного вызова жив — BUSY, повторного вызова нет', rc == 4 and k.count('codex-author') == 1, err)
-    time.sleep(7)
+    time.sleep(13)
     rc, _, err = k.cr('cycle', 'fe')
     check('parallel: ответ прерванного вызова не получен — повтор запрещён, оплата не повторяется', rc == 2 and 'повтор' in err and k.count('codex-author') == 1, err)
 
