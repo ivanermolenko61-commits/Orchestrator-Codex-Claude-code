@@ -13,6 +13,9 @@
   author <uid> [low|medium|high] [--wait СЕК]   один вызов Codex-автора (frontend-единица); --wait: ждать готовности --after без расхода
   cycle <uid> [low|medium|high] [--wait СЕК]    frontend: автор -> проверки -> ревью -> исправления до PASS/лимита
   review [uid] [low|medium|high] [--full]   независимое ревью другим сервисом
+  profile <uid> author|review   профиль Claude (модель/effort) по политике: показать и записать, без вызова модели
+  escalate <uid> author|review --cause quality "<основание>"   повысить профиль Claude на ступень при подтверждённой нехватке качества
+                                (review/cycle принимают --complexity --risk --model --reason: признаки и ручной выбор профиля Claude)
   integrate <uid>               кандидат frontend-единицы в ветку задачи после PASS и успешных проверок: ff-only, а если ветка ушла вперёд
                                 без файлов единицы — слияние без конфликтов, проверки на итоговом SHA до перемещения ветки
   checks [uid]                  механические проверки точного SHA в контейнере (без вызова модели)
@@ -488,6 +491,8 @@ def normalize_state(s):
                      ('rounds', []), ('rethinks', []), ('open_checks', False), ('merged', None),
                      ('findings', {}), ('finding_seq', 0), ('findings_imported', None)):   # реестр замечаний (1.3.0); у старых состояний пуст
             u.setdefault(k, v)
+        if not isinstance(u.get('route'), dict):   # выбор профиля Claude (1.4.0); у состояний прежних версий пуст
+            u['route'] = new_route()
         u.setdefault('credited', [r['sha'] for r in u['rounds'] if r.get('progress') is True])   # SHA, за которые прогресс уже засчитан
         u.setdefault('open_review', (u.get('verdict') or {}).get('value') not in (None, 'PASS'))
         u.setdefault('review_applied', (u.get('verdict') or {}).get('n', 0))
@@ -639,6 +644,8 @@ def check_ledger(entries):
                 bad(f'{name}: описание единицы {uid} не разобрано')
             if not isinstance(m.get('credited', []), list) or not all(isinstance(x, str) for x in m.get('credited', [])):
                 bad(f'{name}: список зачтённых SHA единицы {uid} не разобран')
+            if not isinstance(m.get('route', {}), dict):
+                bad(f'{name}: журнал выбора профиля единицы {uid} не разобран')
             fs = m.get('findings', {})
             if not isinstance(fs, dict) or not is_int(m.get('finding_seq', 0)) or not all(
                     FID_RE.fullmatch(k) and isinstance(v, dict) and v.get('status') in ('open', 'closed', 'withdrawn')
@@ -730,6 +737,9 @@ def carry_unit(task, uid, u):
     u['open_checks'] = bool(m.get('open_checks'))
     u['findings'], u['finding_seq'] = copy.deepcopy(m.get('findings') or {}), m.get('finding_seq', 0)   # ID и статусы переходят вместе с расходом
     u['credited'] = list(m.get('credited') or [])   # зачтённые SHA переходят по цепочке: прогресс одного кандидата не начисляется заново
+    if isinstance(m.get('route'), dict):   # эскалации профиля и признаки не сбрасываются продолжением; старые записи — без маршрута
+        u['route'] = copy.deepcopy(m['route'])
+        u['route'].setdefault('features', {}), u['route'].setdefault('floor', {}), u['route'].setdefault('log', [])
     u['findings_imported'] = m.get('findings_imported')   # запись без реестра (прежняя версия): импорт из отчёта при первом вызове, см. ensure_registry
     mine = verdicts.get(uid) or {}
     u['open_review'] = mine.get('value') not in (None, 'PASS')
@@ -1130,6 +1140,25 @@ def timed(task, uid, stage, ident, **info):
         tlog(task, uid, ev='end', stage=stage, id=ident, duration_s=round(time.monotonic() - t0, 3), outcome=rec.pop('outcome', 'ok'), **rec)
 
 
+def usage_models(kind, text):
+    """Фактические модели и токены по моделям, как их сообщил CLI (modelUsage), и расчётная цена по прейскуранту (total_cost_usd — не счёт
+    подписки). Нет данных — None: неизвестное остаётся неизвестным."""
+    if kind != 'claude-review':
+        return None
+    try:
+        raw = json.loads(text)
+        mu = raw.get('modelUsage') or {}
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(mu, dict) or not mu:
+        return None
+    out = {'models': {m: {k: v[k] for k in ('inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens') if is_int(v.get(k))}
+                      for m, v in mu.items() if isinstance(v, dict)}}
+    if isinstance(raw.get('total_cost_usd'), (int, float)) and not isinstance(raw['total_cost_usd'], bool):
+        out['cost_usd'] = raw['total_cost_usd']
+    return out
+
+
 def usage_tokens(kind, text):
     """Токены — только если CLI их сообщил (Claude --output-format json). Байты токенами не называются."""
     if kind != 'claude-review':
@@ -1215,6 +1244,44 @@ def timing_lines(task):
         f'(вызовов с данными: {len(s["tokens"])} из {s["measured_calls"]}).' if s['tokens'] else 'Токены: CLI их не сообщил.'))
     lines.append('Не измеряется: работа тимлида между командами, подготовка запросов, git-операции, ожидание решений Ивана.')
     return lines
+
+
+def route_lines(task):
+    """Профили Claude по вызовам: запрошенный (запись резерва), фактическая модель по данным CLI, токены и цена по прейскуранту; эскалации.
+    Усилие CLI не сообщает — «фактическое усилие» не заявляется. Вызовы без записи профиля — прежней версии."""
+    ends = {}
+    d = task.dir / 'timing'
+    for p in sorted(d.glob('*.jsonl')) if d.is_dir() else []:
+        try:
+            for line in p.read_text(encoding='utf-8', errors='replace').splitlines():
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict) and e.get('ev') == 'end' and isinstance(e.get('id'), str):
+                    ends.setdefault(e['id'], e)
+        except OSError:
+            continue
+    lines = []
+    for key, c in task.s['calls'].items():
+        if c.get('kind') != 'claude-review':
+            continue
+        pr, e = c.get('profile'), ends.get(key) or {}
+        if not pr:
+            lines.append(f'  {key}: профиль не записан (вызов прежней версии)')
+            continue
+        used = e.get('models') or {}
+        fact = ', '.join(f'{m} (вход {v.get("inputTokens", "?")}, выход {v.get("outputTokens", "?")})' for m, v in used.items()) or 'не сообщена'
+        lines.append(f'  {key}: запрошен {pr["model"]}/{pr["effort"]} [{pr["source"]}: {pr["reason"]}]; фактическая модель по данным CLI: {fact}; усилие CLI не сообщает' +
+                     (f'; цена по прейскуранту ${e["cost_usd"]:.4f}' if 'cost_usd' in e else ''))
+    for k, u in task.s['units'].items():
+        for e in u['route']['log']:
+            if e.get('event') == 'escalated':
+                lines.append(f'  эскалация {e["role"]} {k}: {e["from"]} → {e["to"]} ({"; ".join(e["evidence"])})')
+            elif e.get('event') == 'profile':
+                lines.append(f'  профиль {e["role"]} {k}: {e["model"]}/{e["effort"]} [{e["source"]}]; применение: ' +
+                             (f'сообщено тимлидом — {e["applied_reported"]}' if e.get('applied_reported') else 'не подтверждено'))
+    return ['Профили Claude (запрошенный → фактический):'] + lines if lines else []
 
 
 # ---------------------------------------------------------------- вызов модели: резерв до запуска, receipt, восстановление
@@ -1326,6 +1393,7 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
             tok = usage_tokens(kind, raw.read_text(encoding='utf-8'))
             if tok:
                 tm['tokens'] = tok
+            tm.update(usage_models(kind, raw.read_text(encoding='utf-8')) or {})
         else:
             tm['outcome'] = 'error'
     need(raw.exists(), f'{key}: модель не вернула ответ; автоматический повтор запрещён, см. {d}')
@@ -1387,6 +1455,124 @@ def parse_codex_review(text):
     return {'verdict': v, 'report': text}
 
 
+# ---------------------------------------------------------------- выбор модели и усилия Claude (правила, без модельного вызова)
+
+# Признаки задаёт координатор (complexity, risk) либо выводит движок по файлам (risk_signals); профиль выбирается таблицей. Модель для
+# классификации не вызывается. Codex-путь не затрагивается: модель gpt-6.1-sol фиксирована, меняется только effort.
+COMPLEXITY = ('mechanical', 'matching', 'standard', 'complex', 'architectural')
+RISK = ('normal', 'high')
+POLICY = {'author': {'mechanical': ('haiku', 'low'), 'matching': ('haiku', 'medium'), 'standard': ('sonnet', 'medium'),
+                     'complex': ('sonnet', 'high'), 'architectural': ('opus', 'medium')},
+          # Haiku — не финальная приёмка исполняемой логики: reviewer не опускается ниже Sonnet
+          'review': {'mechanical': ('sonnet', 'low'), 'matching': ('sonnet', 'low'), 'standard': ('sonnet', 'medium'),
+                     'complex': ('sonnet', 'high'), 'architectural': ('opus', 'medium')}}
+HIGH_RISK = ('opus', 'high')
+MODEL_RANK = {'haiku': 0, 'sonnet': 1, 'opus': 2}
+EFFORT_RANK = {'low': 0, 'medium': 1, 'high': 2}
+LADDER = (('haiku', 'low'), ('haiku', 'medium'), ('sonnet', 'low'), ('sonnet', 'medium'), ('sonnet', 'high'), ('opus', 'medium'), ('opus', 'high'))
+MAX_ESCALATIONS = 2   # на роль и единицу (включая цепочку --continues): ступеней конечное число, зацикливания повышением нет
+# Минимальная версия Claude Code для актуальной модели алиаса (документация model-config): на более старой алиас указывает на прежнее
+# поколение, у которого поддержка effort другая. Сверяется с локальной версией, а не принимается на веру.
+MIN_CLI = {'haiku': (2, 1, 293), 'sonnet': (2, 1, 284), 'opus': (2, 1, 280)}
+OWN_PATH_RE = re.compile(r'(^|/)skills/agentq/|(^|/)agentq[\w-]*\.py$')
+_CLI_VERSION = {}
+
+
+def step_key(step):
+    return (MODEL_RANK[step[0]], EFFORT_RANK[step[1]])
+
+
+def new_route():
+    return {'features': {}, 'floor': {}, 'log': []}
+
+
+def claude_version(claude):
+    """Версия установленного Claude Code (кортеж) либо None. Один запрос на процесс."""
+    k = tuple(claude)
+    if k not in _CLI_VERSION:
+        try:
+            m = re.search(r'(\d+)\.(\d+)\.(\d+)', run([*claude, '--version'], timeout=30).stdout)
+        except (OSError, subprocess.SubprocessError):
+            m = None
+        _CLI_VERSION[k] = tuple(int(x) for x in m.groups()) if m else None
+    return _CLI_VERSION[k]
+
+
+def alias_available(version, alias):
+    return bool(version) and version >= MIN_CLI[alias]
+
+
+def risk_signals(task, uid, names):
+    """Признаки высокого риска, выводимые движком из состава файлов: защищённая зона (права, платежи, миграции, CI, зависимости) и сам agentq."""
+    u = task.unit(uid)
+    sig = ['единица protected'] if u['kind'] == 'protected' else []
+    mod, rules = load_rules(task.root)
+    prot = [f for f in names if is_protected(mod, rules, f)]
+    if prot:
+        sig.append('защищённая зона: ' + ', '.join(prot[:3]))
+    if any(OWN_PATH_RE.search(f) for f in names):
+        sig.append('изменяется сам agentq')
+    return sig
+
+
+def choose_profile(task, uid, role, names, opts=None):
+    """Профиль Claude для роли единицы. Приоритет: ручной параметр команды > эскалация (нижняя граница) > таблица политики. Движок-выведенные
+    признаки риска нельзя снять признаками координатора. Недоступная в установленном CLI ступень политики заменяется ближайшей ВЫШЕ и это
+    записывается; ручной выбор недоступной комбинации не заменяется — отказ."""
+    opts = opts or {}
+    u, route = task.unit(uid), task.unit(uid)['route']
+    for k, allowed in (('complexity', COMPLEXITY), ('risk', RISK)):
+        if opts.get(k):
+            need(opts[k] in allowed, f'--{k}: допустимо {", ".join(allowed)}')
+            route['features'][k] = opts[k]
+    cls, risk = route['features'].get('complexity', 'standard'), route['features'].get('risk', 'normal')
+    signals = risk_signals(task, uid, names)
+    why = [f'класс {cls}', f'риск {risk}']
+    if risk == 'high' or signals:
+        step = HIGH_RISK
+        why.append('высокий риск' + (': ' + '; '.join(signals) if signals else ' по признаку координатора'))
+    else:
+        step = POLICY[role][cls]
+    source = 'policy'
+    floor = (route.get('floor') or {}).get(role)
+    if floor and step_key(tuple(floor)) > step_key(step):
+        step, source = tuple(floor), 'escalation'
+        why.append(f'нижняя граница после эскалации {floor[0]}/{floor[1]}')
+    claude = find_claude()
+    need(claude, 'claude CLI не найден')
+    version = claude_version(claude)
+    need(version, 'версия Claude CLI не определена (claude --version): профиль не применяется без проверки возможностей')
+    om, oe = opts.get('model'), opts.get('effort')
+    if om or oe:
+        step, source = (om or step[0], oe or step[1]), 'override'
+        need(step[0] in MODEL_RANK and step[1] in EFFORT_RANK, 'ручной профиль: модель haiku|sonnet|opus, effort low|medium|high')
+        need(alias_available(version, step[0]),
+             f'ручной профиль {step[0]}/{step[1]} недоступен: Claude CLI {".".join(map(str, version))} старше {".".join(map(str, MIN_CLI[step[0]]))} '
+             f'(алиас {step[0]} указывает на прежнее поколение). Подмены нет — выбери другой профиль или обнови CLI')
+        reason = (opts.get('reason') or '').strip()
+        if role == 'review' and step[0] == 'haiku':
+            need(len(reason) >= 20, 'Haiku как независимый reviewer — только по явному решению: --reason «…» (≥ 20 символов); это не финальная приёмка логики')
+        why = [f'ручной параметр {step[0]}/{step[1]}' + (f': {reason}' if reason else '')]
+    elif not alias_available(version, step[0]):
+        want = step
+        step = next((s for s in LADDER if step_key(s) >= step_key(want) and alias_available(version, s[0])), None)
+        need(step, f'ни одна подходящая ступень не доступна в Claude CLI {".".join(map(str, version))}')
+        source = 'fallback'
+        why.append(f'{want[0]}/{want[1]} недоступен в CLI {".".join(map(str, version))} (нужен ≥ {".".join(map(str, MIN_CLI[want[0]]))}): ближайшая выше')
+    return {'model': step[0], 'effort': step[1], 'source': source, 'role': role, 'complexity': cls, 'risk': risk,
+            'reason': '; '.join(why), 'cli': '.'.join(map(str, version))}
+
+
+def next_step(step):
+    return next((s for s in LADDER if step_key(s) > step_key(step)), None)
+
+
+def route_event(task, uid, **ev):
+    log = task.unit(uid)['route']['log']
+    log.append({'at': time.time(), **ev})
+    del log[:-50]
+
+
 # ---------------------------------------------------------------- Claude-ревьюер (фронтенд): свежий контекст, без инструментов
 
 CLAUDE_SCHEMA = {'type': 'object', 'additionalProperties': False,
@@ -1409,14 +1595,14 @@ CLAUDE_SCHEMA = {'type': 'object', 'additionalProperties': False,
                  'required': ['verdict', 'summary', 'findings', 'prior']}
 
 
-def launch_claude_review(effort):
+def launch_claude_review(profile):
     def go(d, prompt):
         claude = find_claude()
         need(claude, 'claude CLI не найден')
         settings = {'disableAllHooks': True, 'enableAllProjectMcpServers': False, 'enabledPlugins': {}}
         tmp = Path(tempfile.mkdtemp())
         try:
-            cmd = [*claude, '-p', '--model', 'opus', '--effort', effort, '--output-format', 'json',
+            cmd = [*claude, '-p', '--model', profile['model'], '--effort', profile['effort'], '--output-format', 'json',
                    '--json-schema', json.dumps(CLAUDE_SCHEMA), '--tools', '', '--strict-mcp-config',
                    '--mcp-config', '{"mcpServers":{}}', '--setting-sources', '', '--settings', json.dumps(settings),
                    '--disable-slash-commands', '--no-session-persistence', '--max-turns', '2',
@@ -1446,9 +1632,14 @@ def render_findings(res):
     return '\n'.join(lines + [one_line(res['summary']), f'VERDICT: {res["verdict"]}'])
 
 
-def parse_claude_review(text):
+def parse_claude_review(text, expect=None):
+    """expect — запрошенный алиас модели: если CLI сообщил другую модель (подмена по настройкам организации, прежнее поколение), ответ не
+    принимается как ревью запрошенного профиля. Модель не сообщена — принимается, значение остаётся «неизвестно» в журнале."""
     raw = json.loads(text)
     need(not raw.get('is_error') and raw.get('subtype') == 'success', 'Claude-reviewer не вернул success')
+    used = list((raw.get('modelUsage') or {}))
+    need(not (expect and used and not any(expect in m.lower() for m in used)),
+         f'MODEL: запрошена {expect}, CLI сообщил {", ".join(used)} — ответ не принят как ревью запрошенного профиля; вызов израсходован, автоповтор запрещён')
     res = raw.get('structured_output')
     need(isinstance(res, dict) and res.get('verdict') in ('PASS', 'FIX', 'UNCERTAIN') and isinstance(res.get('findings'), list),
          'Claude-reviewer: нет структурированного вердикта')
@@ -1626,7 +1817,7 @@ def new_unit(kind, files, context, after, base, spec):
             'branch': None, 'pins': {}, 'candidate': None, 'author_applied': 0, 'review_applied': 0, 'unmet': [], 'checks': None, 'verdict': None,
             'reviewed': None, 'last_report': None, 'carried_report': None, 'review_base': None, 'carried_exclude': [], 'stall': 0,
             'progress': None, 'rounds': [], 'rethinks': [], 'open_checks': False, 'open_review': False, 'merged': None,
-            'findings': {}, 'finding_seq': 0, 'findings_imported': None, 'credited': []}
+            'findings': {}, 'finding_seq': 0, 'findings_imported': None, 'credited': [], 'route': new_route()}
 
 
 def cmd_start(a):
@@ -1680,7 +1871,8 @@ def cmd_start(a):
                         # описание единицы: основание diff и отчёт; база — самая ранняя; запись прежней версии — по базе задачи (род неизвестен)
                         cur = inh['meta'].setdefault(uid, dict(m))
                         cur.update({k: m[k] for k in ('kind', 'files', 'last_report') if m.get(k)})
-                        cur.update({k: m[k] for k in ('stall', 'progress', 'rethinks', 'open_checks', 'findings', 'finding_seq', 'findings_imported', 'credited')
+                        cur.update({k: m[k] for k in ('stall', 'progress', 'rethinks', 'open_checks', 'findings', 'finding_seq', 'findings_imported', 'credited',
+                                                      'route')
                                     if k in m})   # история прогресса и реестр замечаний — последние (реестр более поздней задачи включает прежний)
                         if 'credited' not in m:   # запись прежней версии без списка зачтённых SHA
                             cur['credited'] = sorted(set(cur.get('credited') or []) | legacy_credited(root, e, uid, (e.get('verdicts') or {}).get(uid)))
@@ -2179,6 +2371,7 @@ def validate_and_write(task, uid, res, n):
 
 
 def do_author(task, uid, effort, wait=0):
+    effort = effort or 'medium'   # Codex-автор: модель фиксирована, effort по умолчанию medium
     u = task.unit(uid)
     need(u['kind'] == 'frontend', f'{uid}: автор Codex только для frontend-единиц; backend/protected пишет тимлид')
     need(u['status'] == 'open', f'{uid}: единица {u["status"]}')
@@ -2290,10 +2483,15 @@ def review_prompt(task, uid, n, mode, frm, tip, diff, claude_side, ctx=()):
     return '\n\n'.join(head) + '\n' + diff
 
 
-def do_review(task, uid, effort, full):
+def do_review(task, uid, effort, full, opts=None):
+    """opts — признаки и ручной профиль Claude-reviewer (complexity, risk, model, reason); effort задан явно — ручной effort (для Codex — его effort)."""
+    opts = {**(opts or {})}
+    if effort in EFFORTS:
+        opts.setdefault('effort', effort)
     task.sync()   # состав единиц других процессов (владение файлами) на момент ревью
     root, u = task.root, task.unit(uid)
     fe = u['kind'] == 'frontend'
+    need(fe or not opts.get('model'), '--model относится к Claude; у Codex-reviewer модель фиксирована (gpt-6.1-sol)')
     if fe:
         need(u['candidate'], f'{uid}: нет кандидата — сначала author/cycle')
         tip = u['candidate']
@@ -2354,9 +2552,18 @@ def do_review(task, uid, effort, full):
     subject = {'tip': tip, 'from': frm, 'full': full_mode}
     legacy_ok = lambda t: f'{frm[:10]}..{tip[:10]}' in t   # запрос прежней версии содержит диапазон «от..до»
     if fe:
-        res = model_call(task, uid, 'review', n, 'claude-review', build, launch_claude_review(effort), parse_claude_review, subject=subject, legacy_ok=legacy_ok)
-        who = 'Claude opus (свежий контекст)'
+        key = f'{uid}:review:{n}'
+        known = task.s['calls'].get(key)
+        # вызов уже зарезервирован (повтор после сбоя): профиль берётся из записи резерва, а не пересчитывается; запись прежней версии — без профиля
+        prof = known.get('profile') if known else choose_profile(task, uid, 'review', u['files'], opts)
+        base_build = build
+        build = lambda: (lambda b: (b[0], {**(b[1] or {}), 'profile': prof}))(base_build())
+        res = model_call(task, uid, 'review', n, 'claude-review', build, launch_claude_review(prof) if prof else None,
+                         lambda text: parse_claude_review(text, prof['model'] if prof else None), subject=subject, legacy_ok=legacy_ok)
+        who = f'Claude {prof["model"]}/{prof["effort"]} ({prof["source"]}; свежий контекст)' if prof else 'Claude (профиль прежней версии, не записан)'
+        effort = prof['effort'] if prof else 'не записан'
     else:
+        effort = opts.get('effort') or effort or 'medium'
         res = model_call(task, uid, 'review', n, 'codex-review', build, launch_codex_review(effort), parse_codex_review, subject=subject, legacy_ok=legacy_ok)
         who = f'Codex {MODEL}'
     value, report = res['verdict'], res['report']
@@ -2404,6 +2611,10 @@ def do_review(task, uid, effort, full):
     return 0 if value == 'PASS' else 1
 
 
+def route_opts(a):
+    return {k: getattr(a, k, None) for k in ('complexity', 'risk', 'model', 'reason')}
+
+
 def cmd_cycle(a):
     t = Task(repo_root()).load()
     u = t.unit(a.uid)
@@ -2417,7 +2628,7 @@ def cmd_cycle(a):
         elif u['checks'] and u['checks']['sha'] == cand and u['checks']['ok'] is False:
             do_author(t, a.uid, a.effort, a.wait)
         elif not v or v['sha'] != cand or v.get('integrity'):   # неоднозначный отчёт reviewer: автору нечего исправлять, ревью этого SHA повторяется
-            if do_review(t, a.uid, a.effort, False) == 0:
+            if do_review(t, a.uid, a.effort, False, route_opts(a)) == 0:
                 u['status'] = 'accepted'
                 t.save()
                 say(f'PASS: {a.uid} принят на {cand[:10]}. Дальше: integrate {a.uid}')
@@ -2526,7 +2737,7 @@ def cmd_review(a):
     t = Task(repo_root()).load()
     uid = a.uid
     need(uid, 'укажи единицу: ' + (', '.join(t.s['units']) or 'единиц нет'))   # единица выбрана в main() ДО блокировки; здесь не угадывается
-    code = do_review(t, uid, a.effort, a.full)
+    code = do_review(t, uid, a.effort, a.full, route_opts(a))
     if code == 0 and t.s['units'][uid]['kind'] != 'frontend':
         t.s['units'][uid]['status'] = 'accepted'
         t.save()
@@ -2578,6 +2789,67 @@ def cmd_rethink(a):
     u['stall'], u['progress'] = 0, 'rethink'
     t.save()
     say(f'Пересмотр подхода {a.uid} записан; разрешён следующий круг. Повторное зацикливание — остановка с блокером. Подход: {note}')
+    return 0
+
+
+def cmd_profile(a):
+    """Профиль Claude для роли единицы: показать выбор и записать признаки/причину. Модель не вызывается. Автор Claude — тимлид в основном чате
+    или coder-субагент: движок НЕ переключает основной интерактивный чат, а для coder выдаёт параметры запуска; запись в журнал — это
+    запрошенный профиль, применение подтверждено только тем, что сообщил тимлид (--applied)."""
+    t = Task(repo_root()).load()
+    u = t.unit(a.uid)
+    if (a.role == 'author') == (u['kind'] == 'frontend') or (a.role == 'review') == (u['kind'] != 'frontend'):
+        who = 'Codex-автор' if a.role == 'author' else 'Codex-reviewer'
+        say(f'{a.uid}: {who} ({MODEL}); модель фиксирована, профиль Claude не применяется. Усилие Codex задаётся в команде (low|medium|high).')
+        return 0
+    names = list(u['files']) or ([] if not u['base'] else git(t.root, 'diff', '--no-ext-diff', '--name-only', f'{u["base"]}..HEAD').splitlines())
+    opts = route_opts(a)
+    if a.effort:
+        opts['effort'] = a.effort
+    prof = choose_profile(t, a.uid, a.role, names, opts)
+    ev = {'event': 'profile', 'role': a.role, **{k: prof[k] for k in ('model', 'effort', 'source', 'reason')}}
+    if a.applied:
+        need(not SECRET_RE.search(a.applied), 'в тексте найдено похожее на секрет')
+        ev['applied_reported'] = a.applied[:200]
+    route_event(t, a.uid, **ev)
+    t.save()
+    say(f'ПРОФИЛЬ {a.role} {a.uid}: {prof["model"]}/{prof["effort"]} — {prof["source"]}; {prof["reason"]} (Claude CLI {prof["cli"]}).')
+    if a.role == 'author':
+        say(f'Запуск автора: coder-субагент с параметрами model={prof["model"]}, effort={prof["effort"]}. Основной чат тимлида движок не переключает: '
+            'если автор — сам тимлид, смена модели выполняется вручную (/model, /effort) и в журнале помечена как «сообщено», а не «подтверждено».')
+    return 0
+
+
+def cmd_escalate(a):
+    """Повышение профиля на одну ступень только при подтверждённой журналом нехватке качества. Бюджеты, история и защита от зацикливания не
+    затрагиваются: меняется лишь нижняя граница профиля следующих вызовов роли."""
+    t = Task(repo_root()).load()
+    u = t.unit(a.uid)
+    need(a.cause == 'quality', f'эскалация только при доказанной нехватке качества (--cause quality). Причина «{a.cause}» повышением модели или '
+         'усилия не исправляется: сеть, квота и отсутствующий контекст устраняются иначе (повтор позже, лимит, дополнение контекста)')
+    need((a.role == 'author') == (u['kind'] != 'frontend'), f'{a.uid}: у роли {a.role} в этой единице Claude не участвует')
+    note = a.note.strip()
+    need(len(note) >= 20, 'опиши, что подтверждено: контекст проверен, причина не в сети/квоте/контексте (≥ 20 символов)')
+    need(not SECRET_RE.search(note), 'в тексте найдено похожее на секрет')
+    v, ev = u['verdict'], []
+    if a.role == 'review' and v and v['value'] == 'UNCERTAIN':
+        ev.append('вердикт reviewer UNCERTAIN')
+    if u['stall'] >= 1:
+        ev.append(f'кругов без прогресса подряд: {u["stall"]}')
+    if a.role == 'author' and u['unmet']:
+        ev.append('автор объявил незакрытые требования: ' + '; '.join(u['unmet'])[:200])
+    need(ev, 'в журнале нет подтверждения нехватки качества (UNCERTAIN, круг без прогресса, незакрытые требования автора). FIX сам по себе — не основание: '
+         'автор исправляет замечания на прежнем профиле')
+    done = sum(1 for e in u['route']['log'] if e.get('event') == 'escalated' and e.get('role') == a.role)
+    need(done < MAX_ESCALATIONS, f'уже {done} эскалации роли {a.role} в этой единице (предел {MAX_ESCALATIONS}): решает Иван — сузить требования или принять остаток')
+    names = list(u['files']) or ([] if not u['base'] else git(t.root, 'diff', '--no-ext-diff', '--name-only', f'{u["base"]}..HEAD').splitlines())
+    cur = choose_profile(t, a.uid, a.role, names)
+    nxt = next_step((cur['model'], cur['effort']))
+    need(nxt, f'выше {cur["model"]}/{cur["effort"]} ступеней нет: решает Иван')
+    u['route']['floor'][a.role] = list(nxt)
+    route_event(t, a.uid, event='escalated', role=a.role, **{'from': f'{cur["model"]}/{cur["effort"]}', 'to': f'{nxt[0]}/{nxt[1]}'}, evidence=ev, note=note)
+    t.save()
+    say(f'Эскалация {a.role} {a.uid}: {cur["model"]}/{cur["effort"]} → {nxt[0]}/{nxt[1]}. Основание: {"; ".join(ev)}. Бюджет вызовов и история не изменены.')
     return 0
 
 
@@ -2636,6 +2908,8 @@ def cmd_status(a):
                 (f'; ИЗМЕНИЛСЯ после ревью: {", ".join(drift)}' if drift else ''))
     for line in timing_lines(t):
         say(line)
+    for line in route_lines(t):
+        say(line)
     return 0
 
 
@@ -2685,7 +2959,7 @@ def cmd_finish(a):
                                       'last_report': u['last_report'] or u['carried_report'], 'stall': u['stall'],
                                       'progress': u['progress'], 'rethinks': u['rethinks'], 'open_checks': u['open_checks'],
                                       'findings': u['findings'], 'finding_seq': u['finding_seq'], 'findings_imported': u['findings_imported'],
-                                      'credited': u['credited']}
+                                      'credited': u['credited'], 'route': u['route']}
                                   for k, u in t.s['units'].items()}})
     wjson(Path(root) / '.ai/ledger.json', entries)
     dest = Path(root) / '.ai/done' / f'{time.strftime("%Y%m%d-%H%M%S")}-{t.s["id"]}'
@@ -2706,6 +2980,13 @@ def state_units(root, strict=False):
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         need(not strict, 'состояние задачи не читается: блокировки единиц не определены, finish отказан — повтори')
         return []
+
+
+def route_args(s):
+    s.add_argument('--complexity', choices=COMPLEXITY, help='признак координатора: класс задачи для выбора профиля Claude (по умолчанию standard)')
+    s.add_argument('--risk', choices=RISK, help='признак координатора: high — права, платежи, миграции, конкурентный бюджет, сам agentq')
+    s.add_argument('--model', choices=tuple(MODEL_RANK), help='ручной выбор модели Claude (приоритет над политикой); у Codex модель фиксирована')
+    s.add_argument('--reason', help='причина ручного выбора (для Haiku как reviewer ≥ 20 символов)')
 
 
 def main(argv=None):
@@ -2734,11 +3015,25 @@ def main(argv=None):
     for name in ('author', 'cycle'):
         s = sub.add_parser(name)
         s.add_argument('uid')
-        s.add_argument('effort', nargs='?', choices=EFFORTS, default='medium')
+        s.add_argument('effort', nargs='?', choices=EFFORTS, default=None)
+        if name == 'cycle':
+            route_args(s)
         s.add_argument('--wait', type=int, default=0, help='секунд ждать готовности зависимостей --after (без вызовов моделей); иначе код 5 WAIT')
     s = sub.add_parser('review')
     s.add_argument('rest', nargs='*')
     s.add_argument('--full', action='store_true')
+    route_args(s)
+    s = sub.add_parser('profile', help='профиль Claude для роли единицы: показать выбор и записать (без вызова модели)')
+    s.add_argument('uid')
+    s.add_argument('role', choices=('author', 'review'))
+    s.add_argument('--effort', choices=EFFORTS)
+    s.add_argument('--applied', help='какая модель фактически запущена у автора (сообщает тимлид; движок это не проверяет)')
+    route_args(s)
+    s = sub.add_parser('escalate', help='повысить профиль Claude на ступень при подтверждённой нехватке качества')
+    s.add_argument('uid')
+    s.add_argument('role', choices=('author', 'review'))
+    s.add_argument('--cause', choices=('quality', 'network', 'quota', 'context', 'unknown'), required=True)
+    s.add_argument('note')
     s = sub.add_parser('integrate')
     s.add_argument('uid')
     s = sub.add_parser('checks')
@@ -2755,7 +3050,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     try:
         if a.cmd == 'review':
-            a.effort = next((r for r in a.rest if r in EFFORTS), 'medium')
+            a.effort = next((r for r in a.rest if r in EFFORTS), None)   # None — не задан: Codex medium, профиль Claude по политике
             others = [r for r in a.rest if r not in EFFORTS]
             need(len(others) <= 1, 'review [uid] [low|medium|high] [--full]')
             a.uid = others[0] if others else None
@@ -2781,7 +3076,8 @@ def main(argv=None):
             if uid and UNIT_RE.fullmatch(uid):   # одна команда на единицу; разные единицы выполняются параллельно
                 st.enter_context(Lock(root, f'unit-{uid}'))
             return {'author': cmd_author, 'cycle': cmd_cycle, 'review': cmd_review, 'integrate': cmd_integrate,
-                    'checks': cmd_checks, 'waive': cmd_waive, 'rethink': cmd_rethink}[a.cmd](a)
+                    'checks': cmd_checks, 'waive': cmd_waive, 'rethink': cmd_rethink,
+                    'profile': cmd_profile, 'escalate': cmd_escalate}[a.cmd](a)
     except Blocked as e:
         print(f'{ {3: "LIMIT", 4: "BUSY", 5: "WAIT"}.get(e.code, "ERROR") }: {e}', file=sys.stderr)
         return e.code

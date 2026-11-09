@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -73,6 +74,9 @@ import json, os, sys
 from pathlib import Path
 d = Path(__file__).resolve().parent
 a = sys.argv[1:]
+if a[:1] == ['--version']:
+    vp = d / 'claude_version.txt'
+    print(vp.read_text().strip() if vp.exists() else '2.1.300 (Claude Code)'); sys.exit(0)
 if a[:2] == ['auth', 'status']:
     print(json.dumps({'loggedIn': True, 'authMethod': 'claude.ai'})); sys.exit(0)
 prompt = sys.stdin.read()
@@ -83,10 +87,16 @@ while True:
     except FileExistsError:
         n += 1
 with (d / 'calls.log').open('a') as f:
-    f.write('claude-review model=' + a[a.index('--model') + 1] + ' tools=' + repr(a[a.index('--tools') + 1]) + ' nosession=' + str('--no-session-persistence' in a) + '\n')
+    leak = [k for k in ('CLAUDE_CODE_EFFORT_LEVEL', 'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+                        'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL', 'ANTHROPIC_API_KEY') if k in os.environ]
+    f.write('claude-review model=' + a[a.index('--model') + 1] + ' tools=' + repr(a[a.index('--tools') + 1]) + ' nosession=' + str('--no-session-persistence' in a) +
+            ' effort=' + a[a.index('--effort') + 1] + ' leak=' + ','.join(leak) + ' fallback=' + str('--fallback-model' in a) + '\n')
 (d / f'claude-prompt-{n}.txt').write_text(prompt, encoding='utf-8')
 sc = json.loads((d / 'claude.json').read_text())[n]
 out = {'is_error': False, 'subtype': 'success', 'structured_output': sc}
+mname = json.loads((d / 'claude_model.json').read_text()) if (d / 'claude_model.json').exists() else 'claude-%s-5-5' % a[a.index('--model') + 1]
+out['modelUsage'] = {mname: {'inputTokens': 11, 'outputTokens': 22, 'cacheReadInputTokens': 0, 'cacheCreationInputTokens': 33}}
+out['total_cost_usd'] = 0.0123
 if (d / 'claude_usage.json').exists():
     out['usage'] = json.loads((d / 'claude_usage.json').read_text())
 print(json.dumps(out))
@@ -2776,11 +2786,197 @@ def t_acceptance_regressions():
           res.stdout.split() == ['INT'] and len(ev) == 1 and ev[0]['stage'] == 'wait' and ev[0]['outcome'] == 'aborted' and ev[0]['duration_s'] >= 0, (res.stdout, res.stderr, ev))
 
 
+def mixed_proj(label):
+    p = Proj(label)
+    check(f'{label}: старт', p.cr('start', f'{label} задача', '--id', label, '--kind', 'mixed', '--contract-file', p.contract())[0] == 0)
+    for args in (('be', '--kind', 'backend', '--files', 'backend/app.py'), ('pr', '--kind', 'protected', '--files', 'package.json'),
+                 ('ag', '--kind', 'backend', '--files', 'skills/agentq/engine.py'), ('fe', '--kind', 'frontend', '--files', *FE_FILES)):
+        rc, _, err = p.cr('unit', *args)
+        check(f'{label}: единица {args[0]}', rc == 0, err)
+    return p
+
+
+def t_model_routing():
+    """Выбор модели и усилия Claude (1.4.0): матрица маршрутов и риска, реальные argv, окружение, ручной выбор, недоступные комбинации,
+    несовпадение модели, эскалация без сброса бюджета, прежние записи и продолжение."""
+    def cl(p):
+        return [c for c in p.calls() if c.startswith('claude-review')]
+
+    def chain(p):
+        m = re.search(r'вызовов цепочки (\d+)', p.cr('status')[1])
+        return int(m.group(1)) if m else None
+
+    # --- матрица: класс × роль, риск по признаку координатора и по файлам (без вызовов моделей)
+    p = mixed_proj('rt-matrix')
+    for uid, role, extra, want in (
+            ('be', 'author', (), 'sonnet/medium'), ('be', 'author', ('--complexity', 'mechanical'), 'haiku/low'),
+            ('be', 'author', ('--complexity', 'matching'), 'haiku/medium'), ('be', 'author', ('--complexity', 'standard'), 'sonnet/medium'),
+            ('be', 'author', ('--complexity', 'complex'), 'sonnet/high'), ('be', 'author', ('--complexity', 'architectural'), 'opus/medium'),
+            ('be', 'author', ('--risk', 'high'), 'opus/high'), ('be', 'author', ('--risk', 'normal', '--complexity', 'standard'), 'sonnet/medium'),
+            ('fe', 'review', (), 'sonnet/medium'), ('fe', 'review', ('--complexity', 'mechanical'), 'sonnet/low'),
+            ('fe', 'review', ('--complexity', 'matching'), 'sonnet/low'), ('fe', 'review', ('--complexity', 'complex'), 'sonnet/high'),
+            ('fe', 'review', ('--complexity', 'architectural'), 'opus/medium'), ('fe', 'review', ('--risk', 'high'), 'opus/high'),
+            ('pr', 'author', ('--risk', 'normal', '--complexity', 'mechanical'), 'opus/high'), ('ag', 'author', ('--complexity', 'mechanical'), 'opus/high')):
+        rc, out, err = p.cr('profile', uid, role, *extra)
+        check(f'матрица: {uid} {role} {" ".join(extra) or "по умолчанию"} → {want}', rc == 0 and f'ПРОФИЛЬ {role} {uid}: {want} — ' in out, out + err)
+    out = p.cr('profile', 'pr', 'author')[1]
+    out2 = p.cr('profile', 'ag', 'author')[1]
+    check('риск выводится движком: защищённая зона и сам agentq, признак координатора normal его не снимает',
+          'защищённая зона' in out and 'изменяется сам agentq' in out2, out + out2)
+    pol = load_engine().POLICY
+    check('reviewer Claude ни в одной ячейке политики не опускается до Haiku (не финальная приёмка логики)',
+          all(model != 'haiku' for model, _ in pol['review'].values()) and any(model == 'haiku' for model, _ in pol['author'].values()))
+    rc, out, _ = p.cr('profile', 'fe', 'author')
+    check('Codex-автор и Codex-reviewer: профиль Claude не применяется, модель фиксирована',
+          rc == 0 and 'Codex-автор' in out and 'gpt-6.1-sol' in out and 'Codex-reviewer' in p.cr('profile', 'be', 'review')[1])
+    rc, _, err = p.cr('profile', 'fe', 'review', '--complexity', 'huge')
+    check('неизвестный класс отклонён', rc == 2, err)
+    rc, _, err = p.cr('profile', 'fe', 'review', '--model', 'haiku')
+    check('ручной выбор Haiku как reviewer без причины отклонён', rc == 2 and 'Haiku' in err, err)
+    rc, out, _ = p.cr('profile', 'fe', 'review', '--model', 'haiku', '--reason', 'явное решение владельца для проверки текста')
+    check('ручной выбор Haiku как reviewer с причиной принят и помечен override', rc == 0 and 'haiku/' in out and 'override' in out, out)
+    out = p.cr('profile', 'be', 'author', '--complexity', 'standard', '--applied', 'claude-sonnet-5-5 (по /model)')[1]
+    st = p.cr('status')[1]
+    check('автор: применение подтверждено только как «сообщено тимлидом»; основной чат движок не переключает',
+          'Основной чат тимлида движок не переключает' in out and 'сообщено тимлидом — claude-sonnet-5-5' in st and 'не подтверждено' in st, out + st)
+
+    # --- реальные argv, окружение и фактическая модель
+    q = mixed_proj('rt-argv')
+    q.script('codex', [{'files': FILES_OK1}])
+    q.script('claude', [OK])
+    leak_env = {'CLAUDE_CODE_EFFORT_LEVEL': 'low', 'ANTHROPIC_MODEL': 'haiku', 'ANTHROPIC_DEFAULT_SONNET_MODEL': 'x', 'ANTHROPIC_API_KEY': 'k',
+                'CLAUDE_CODE_SUBAGENT_MODEL': 'haiku'}
+    rc, out, err = q.cr('cycle', 'fe', env=leak_env)
+    check('argv: по умолчанию reviewer получает --model sonnet --effort medium (а не жёсткий opus)',
+          rc == 0 and len(cl(q)) == 1 and 'model=sonnet ' in cl(q)[0] and 'effort=medium' in cl(q)[0], out + err + str(q.calls()))
+    check('окружение: переменные выбора модели/усилия и ключи из родительской среды в процесс Claude не попадают, --fallback-model не задан',
+          'leak= ' in cl(q)[0] + ' ' and 'fallback=False' in cl(q)[0], cl(q))
+    st = q.cr('status')[1]
+    check('status: запрошенный профиль, причина, фактическая модель по данным CLI, токены и оговорка про усилие',
+          'запрошен sonnet/medium [policy: класс standard' in st and 'claude-sonnet-5-5 (вход 11, выход 22)' in st and 'усилие CLI не сообщает' in st
+          and 'цена по прейскуранту $0.0123' in st, st)
+    sc = rstate(q)['units']['fe']
+    check('в записи резерва вызова сохранён профиль', rstate(q)['calls']['fe:review:1']['profile']['model'] == 'sonnet' and sc['route']['features'] == {})
+    o = mixed_proj('rt-ovr')
+    o.script('codex', [{'files': FILES_OK1}])
+    o.script('claude', [OK])
+    rc, out, err = o.cr('cycle', 'fe', 'high', '--model', 'opus', '--reason', 'ручной выбор для проверки приоритета')
+    check('ручной override: --model opus и effort high применены в argv, источник override с причиной',
+          rc == 0 and 'model=opus ' in cl(o)[0] and 'effort=high' in cl(o)[0] and 'override' in o.cr('status')[1] and 'ручной выбор для проверки' in o.cr('status')[1],
+          out + err + str(o.calls()))
+    e = mixed_proj('rt-effort')
+    e.script('codex', [{'files': FILES_OK1}])
+    e.script('claude', [OK])
+    rc, _, _ = e.cr('cycle', 'fe', 'low', '--complexity', 'architectural')
+    check('явный effort прежнего вида меняет только усилие, модель остаётся по политике (opus для architectural)',
+          rc == 0 and 'model=opus ' in cl(e)[0] and 'effort=low' in cl(e)[0], cl(e))
+    cx = mixed_proj('rt-codexopt')
+    cx.script('codex', [{'text': 'VERDICT: PASS'}])
+    cx.commit('backend/app.py', BODY_T.format(n=1))
+    rc, _, err = cx.cr('review', 'be', 'low', '--model', 'opus')
+    check('--model для Codex-reviewer отклонён до вызова (модель Codex фиксирована)', rc == 2 and 'фиксирована' in err and not cx.calls(), err)
+
+    # --- недоступные комбинации
+    v = mixed_proj('rt-old')
+    (v.fake / 'claude_version.txt').write_text('2.1.286 (Claude Code)')
+    rc, out, _ = v.cr('profile', 'be', 'author', '--complexity', 'mechanical')
+    check('CLI 2.1.286: haiku недоступен — ближайшая ступень выше, замена записана и показана (не молча)',
+          rc == 0 and 'sonnet/low' in out and 'fallback' in out and 'недоступен в CLI 2.1.286' in out, out)
+    rc, _, err = v.cr('profile', 'be', 'author', '--model', 'haiku')
+    check('CLI 2.1.286: ручной выбор haiku не подменяется — отказ с причиной', rc == 2 and 'недоступен' in err and 'Подмены нет' in err, err)
+    check('CLI 2.1.286: sonnet по политике доступен', 'sonnet/medium' in v.cr('profile', 'fe', 'review')[1])
+    (v.fake / 'claude_version.txt').write_text('2.1.270 (Claude Code)')
+    rc, _, err = v.cr('profile', 'fe', 'review', '--complexity', 'standard')
+    check('CLI старше всех минимальных версий: профиль не применяется, вызова нет', rc == 2 and 'не доступна' in err and not cl(v), err)
+    (v.fake / 'claude_version.txt').write_text('неизвестно')
+    rc, _, err = v.cr('profile', 'fe', 'review')
+    check('версия CLI не определена: отказ без догадок', rc == 2 and 'не определена' in err, err)
+
+    # --- модель в ответе не совпала с запрошенной
+    m = mixed_proj('rt-mm')
+    m.script('codex', [{'files': FILES_OK1}])
+    m.script('claude', [OK])
+    (m.fake / 'claude_model.json').write_text('"claude-opus-5-5"')
+    m.cr('author', 'fe')
+    rc, _, err = m.cr('review', 'fe')
+    u = rstate(m)['units']['fe']
+    check('подмена модели: ответ не принят, PASS нет, вердикта нет, причина названа', rc == 2 and 'MODEL:' in err and u['verdict'] is None and len(cl(m)) == 1, err)
+    rc, _, err = m.cr('review', 'fe', '--complexity', 'architectural')   # признаки изменились: при восстановлении профиль берётся из записи резерва, а не пересчитывается
+    check('после отказа повторный запуск не вызывает Claude заново (читает сохранённый ответ), профиль из записи резерва, вердикт не выдан',
+          rc == 2 and 'MODEL:' in err and len(cl(m)) == 1 and rstate(m)['units']['fe']['verdict'] is None, err)
+
+    # --- прежние записи без профиля
+    g = mixed_proj('rt-legacy')
+    g.script('codex', [{'files': FILES_OK1}])
+    g.script('claude', [OK])
+    g.cr('author', 'fe')
+    rc, _, _ = g.cr('review', 'fe')
+
+    def strip(s_):
+        s_['calls']['fe:review:1'].pop('profile', None)
+    state_edit(g, strip)
+    st = g.cr('status')[1]
+    check('прежний вызов без профиля: status читает его и так и пишет', rc == 0 and 'fe:review:1: профиль не записан (вызов прежней версии)' in st, st)
+
+    def forget(s_):
+        u_ = s_['units']['fe']
+        u_['verdict'], u_['reviewed'], u_['last_report'], u_['review_applied'], u_['open_review'] = None, None, None, 0, False
+    state_edit(g, forget)
+    (g.repo / '.ai/task/calls/fe-review-1/receipt.json').unlink()
+    rc, out, err = g.cr('review', 'fe')
+    check('прежний прерванный вызов без профиля восстанавливается по сохранённому ответу без нового вызова Claude',
+          rc == 0 and len(cl(g)) == 1 and rstate(g)['units']['fe']['verdict']['value'] == 'PASS', out + err)
+
+    # --- эскалация: только по доказанной нехватке качества, без сброса бюджета
+    x = mixed_proj('rt-esc')
+    x.script('codex', [{'files': FILES_OK1}, {'files': FILES_OK2}])
+    x.script('claude', [UNC, OK])
+    for cause in ('network', 'quota', 'context'):
+        rc, _, err = x.cr('escalate', 'fe', 'review', '--cause', cause, 'повышение усилия не лечит эту причину сбоя')
+        check(f'эскалация по причине «{cause}» отклонена', rc == 2 and 'не исправляется' in err, err)
+    rc, _, err = x.cr('escalate', 'fe', 'review', '--cause', 'quality', 'контекст проверен, причина не сеть и не квота')
+    check('эскалация без свидетельств в журнале отклонена: FIX сам по себе не основание', rc == 2 and 'нет подтверждения' in err, err)
+    x.cr('author', 'fe')
+    rc, _, _ = x.cr('review', 'fe')
+    before = chain(x)
+    budget0, calls0 = rstate(x)['budget'], sorted(rstate(x)['calls'])
+    rc2, out, err = x.cr('escalate', 'fe', 'review', '--cause', 'quality', 'контекст проверен, сеть и квота в порядке, ответ неопределённый')
+    check('эскалация после UNCERTAIN: sonnet/medium → sonnet/high, основание названо', rc == 1 and rc2 == 0 and 'sonnet/medium → sonnet/high' in out and 'UNCERTAIN' in out, out + err)
+    check('эскалация не меняет бюджет, записи вызовов и расход цепочки',
+          chain(x) == before == 2 and rstate(x)['budget'] == budget0 and sorted(rstate(x)['calls']) == calls0, (before, chain(x), budget0, rstate(x)['budget']))
+    rc, _, err = x.cr('escalate', 'fe', 'author', '--cause', 'quality', 'у frontend-автора Claude не участвует, это Codex')
+    check('эскалация роли, где Claude не участвует, отклонена', rc == 2 and 'не участвует' in err, err)
+    x.cr('author', 'fe')
+    rc, out, err = x.cr('review', 'fe')
+    check('следующее ревью идёт с эскалированным профилем sonnet/high (источник escalation)',
+          rc == 0 and 'model=sonnet ' in cl(x)[1] and 'effort=high' in cl(x)[1] and 'эскалация review fe: sonnet/medium → sonnet/high' in x.cr('status')[1]
+          and 'escalation:' in x.cr('status')[1], out + err + str(cl(x)))
+    check('расход цепочки после эскалации — только реальные вызовы (4)', chain(x) == 4, chain(x))
+
+    state_edit(x, lambda s_: s_['units']['fe']['verdict'].update(value='UNCERTAIN'))
+    rc, _, err = x.cr('escalate', 'fe', 'review', '--cause', 'quality', 'ещё одна ступень по подтверждённой нехватке качества')
+    check('вторая эскалация допустима (предел 2 на роль и единицу)', rc == 0, err)
+    state_edit(x, lambda s_: s_['units']['fe']['verdict'].update(value='UNCERTAIN'))
+    rc, _, err = x.cr('escalate', 'fe', 'review', '--cause', 'quality', 'третья ступень по подтверждённой нехватке качества')
+    check('третья эскалация отклонена: решает Иван', rc == 2 and 'предел' in err, err)
+
+    # --- журнал и продолжение
+    rc, _, _ = x.cr('finish', '--abandon')
+    led = rledger(x)[-1]['unit_meta']['fe']['route']
+    check('журнал: эскалации и нижняя граница профиля сохранены в записи задачи', rc == 1 and led['floor'].get('review') and len(
+        [e for e in led['log'] if e.get('event') == 'escalated']) == 2, led)
+    rc, _, err = x.cr('start', 'rt-esc продолжение', '--id', 'rt-esc-2', '--kind', 'mixed', '--contract-file', x.contract(), '--continues', 'rt-esc')
+    x.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    rc2, out, err2 = x.cr('profile', 'fe', 'review')
+    check('продолжение (--continues): нижняя граница профиля и журнал эскалаций не сбрасываются',
+          rc == 0 and rc2 == 0 and 'escalation' in out and ('opus' in out or 'sonnet/high' in out), out + err + err2)
+
+
 def main():
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding='utf-8', errors='replace')
     for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_task_budget_scope, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links, t_parallel,
-              t_unavailable_and_modes, t_findings, t_context, t_timing, t_acceptance_regressions):
+              t_unavailable_and_modes, t_findings, t_context, t_timing, t_acceptance_regressions, t_model_routing):
         try:
             t()
         except Exception as e:  # noqa: BLE001
