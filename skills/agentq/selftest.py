@@ -92,7 +92,8 @@ with (d / 'calls.log').open('a') as f:
     kind = 'claude-review' if '--json-schema' in a else 'claude-author'
     f.write(kind + ' model=' + a[a.index('--model') + 1] + ' tools=' + repr(a[a.index('--tools') + 1]) + ' nosession=' + str('--no-session-persistence' in a) +
             ' effort=' + a[a.index('--effort') + 1] + ' leak=' + ','.join(leak) + ' fallback=' + str('--fallback-model' in a) +
-            ' mode=' + (a[a.index('--permission-mode') + 1] if '--permission-mode' in a else '-') + '\n')
+            ' mode=' + (a[a.index('--permission-mode') + 1] if '--permission-mode' in a else '-') +
+            ' incwd=' + str(Path.cwd()) + ' cwdfiles=' + ','.join(sorted(q_.relative_to(Path.cwd()).as_posix() for q_ in Path.cwd().rglob('*') if q_.is_file())) + '\n')
 (d / f'claude-prompt-{n}.txt').write_text(prompt, encoding='utf-8')
 (d / f'claude-settings-{n}.json').write_text(a[a.index('--settings') + 1], encoding='utf-8')
 sc = json.loads((d / 'claude.json').read_text())[n]
@@ -3046,6 +3047,7 @@ def t_claude_author():
     check('автор Claude: реальный запуск claude -p с профилем sonnet/medium, инструменты без Bash, режим dontAsk, окружение очищено',
           rc == 0 and len(ca(p)) == 1 and 'model=sonnet ' in ca(p)[0] and 'effort=medium' in ca(p)[0] and "tools='Read,Edit,Write'" in ca(p)[0]
           and 'mode=dontAsk' in ca(p)[0] and 'leak= ' in ca(p)[0] + ' ' and 'nosession=True' in ca(p)[0], out + err + str(p.calls()))
+    check('изоляция: в рабочем каталоге автора только файл единицы из коммита', ca(p)[0].endswith('cwdfiles=backend/app.py'), ca(p))
     check('автор Claude: коммит только файла единицы с меткой раунда, автор коммита agent-claude',
           'aq:ca-ok/be/a1' in p.git('log', '-1', '--format=%s') and 'agent-claude' in p.git('log', '-1', '--format=%an')
           and (p.repo / 'backend/app.py').read_text(encoding='utf-8') == APP_C and not p.git('status', '--porcelain'), p.git('log', '-1', '--format=%s'))
@@ -3068,9 +3070,9 @@ def t_claude_author():
     o.script('claude', [{'edit': {'backend/app.py': APP_C, 'backend/other.py': 'x = 1\n'}}])
     rc, _, err = o.cr('author-claude', 'be', '--task-file', note(o))
     rc2, _, err2 = o.cr('author-claude', 'be', '--task-file', note(o))
-    check('автор изменил файл вне списка: отказ, коммита нет, правки оставлены для разбора, повтор не вызывает Claude заново',
+    check('автор создал файл вне списка: отказ, репозиторий не тронут, коммита нет, повтор не вызывает Claude заново',
           rc == 2 and rc2 == 2 and 'вне списка' in err and 'вне списка' in err2 and head(o) == h0 and len(ca(o)) == 1
-          and (o.repo / 'backend/other.py').exists(), err + err2)
+          and not (o.repo / 'backend/other.py').exists() and not o.git('status', '--porcelain'), err + err2)
     e_ = mixed_proj('ca-empty')
     e_.script('claude', [{'edit': {}}])
     rc, _, err = e_.cr('author-claude', 'be', '--task-file', note(e_))
@@ -3079,6 +3081,34 @@ def t_claude_author():
     d_.script('claude', [{'rm': ['backend/app.py']}])
     rc, _, err = d_.cr('author-claude', 'be', '--task-file', note(d_))
     check('удаление файла автором Claude отклонено', rc == 2 and 'удаление' in err, err)
+    # содержимое результата автора: секрет и скрытые символы не попадают в репозиторий
+    for label, content, why in (('ca-leak', 'KEY = "ghp_' + 'c' * 24 + '"' + chr(10), 'секрет'), ('ca-hid', 'X = 1' + chr(10) + chr(0x200b) + chr(10), 'скрытые')):
+        k_ = mixed_proj(label)
+        k_.script('claude', [{'edit': {'backend/app.py': content}}])
+        h0 = head(k_)
+        rc, _, err = k_.cr('author-claude', 'be', '--task-file', note(k_))
+        check(f'в результате автора {why}: отказ, коммита нет, рабочее дерево репозитория не тронуто',
+              rc == 2 and why in err and head(k_) == h0 and not k_.git('status', '--porcelain') and (k_.repo / 'backend/app.py').read_text(encoding='utf-8') != content, err)
+    # автор не может изменить файл контекста; сохранённая копия результата не подменяется
+    c2 = mixed_proj('ca-ctxmod')
+    c2.commit('backend/helper.py', 'HELPER_MARK = 1' + chr(10), 'helper')
+    c2.cr('unit', 'bc', '--kind', 'backend', '--files', 'backend/mod2.py', '--context', 'backend/helper.py')
+    c2.script('claude', [{'edit': {'backend/mod2.py': 'X = 1' + chr(10), 'backend/helper.py': 'HELPER_MARK = 2' + chr(10)}}])
+    h0 = head(c2)
+    rc, _, err = c2.cr('author-claude', 'bc', '--task-file', note(c2))
+    check('автор изменил файл контекста: отказ, репозиторий не тронут, коммита нет',
+          rc == 2 and 'файлы контекста' in err and head(c2) == h0 and not c2.git('status', '--porcelain') and not (c2.repo / 'backend/mod2.py').exists(), err)
+    tm = mixed_proj('ca-tamper')
+    tm.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    tm.cr('author-claude', 'be', '--task-file', note(tm))
+    tm.git('reset', '--soft', 'HEAD~1')
+    state_edit(tm, lambda s_: s_['units']['be'].update(author_applied=0))
+    saved = tm.repo / '.ai/task/calls/be-author-1/result/backend/app.py'
+    saved.write_text(APP_C + '# подмена' + chr(10), encoding='utf-8')
+    h1 = head(tm)
+    rc, _, err = tm.cr('author-claude', 'be', '--task-file', note(tm))
+    check('сохранённая копия результата изменена после записи: отказ по хешам результата, коммита нет, Claude заново не вызывался',
+          rc == 2 and 'сохранённый результат автора изменён' in err and head(tm) == h1 and len(ca(tm)) == 1, err)
     # границы ролей и состояния до вызова
     r = mixed_proj('ca-refuse')
     r.script('claude', [{'edit': {'backend/app.py': APP_C}}])
@@ -3120,14 +3150,6 @@ def t_claude_author():
     rc, _, err = g.cr('author-claude', 'be', '--task-file', note(g))
     check('чужое staged-изменение до запуска: отказ ДО вызова Claude, коммита нет, индекс не тронут',
           rc == 2 and 'staged' in err and not ca(g) and head(g) == h0 and g.git('diff', '--cached', '--name-only') == 'package.json', err)
-    g2 = mixed_proj('ca-stg2')
-    g2.script('claude', [{'edit': {'backend/app.py': APP_C}, 'stage': {'package.json': '{"during": true}'}}])
-    h0 = head(g2)
-    rc, _, err = g2.cr('author-claude', 'be', '--task-file', note(g2))
-    rc2, _, err2 = g2.cr('author-claude', 'be', '--task-file', note(g2))
-    check('staged-изменение появилось во время работы автора: коммита нет, чужая правка в коммит не попала, повтор не вызывает Claude заново',
-          rc == 2 and rc2 == 2 and ('вне списка' in err or 'staged' in err) and ('вне списка' in err2 or 'staged' in err2) and head(g2) == h0 and len(ca(g2)) == 1
-          and g2.git('diff', '--cached', '--name-only') == 'package.json' and (g2.repo / 'backend/app.py').read_text(encoding='utf-8') == APP_C, err + err2)
     # восстановление после обрыва, когда за коммитом автора уже есть чужой коммит
     lt = mixed_proj('ca-later')
     lt.script('claude', [{'edit': {'backend/app.py': APP_C}}])
@@ -3163,6 +3185,8 @@ def t_claude_author():
     # чтение: только файлы единицы и проверенный контекст; Grep/Glob и секретные пути не даются
     cx = mixed_proj('ca-ctx')
     cx.commit('backend/helper.py', 'HELPER_MARK = 1' + chr(10), 'helper')
+    cx.commit('notes.txt', 'посторонний файл репозитория' + chr(10), 'notes')
+    (cx.repo / '.env').write_text('DEMO_KEY=demo-not-a-real-key-123', encoding='utf-8')   # неотслеживаемый секрет в рабочем дереве
     rc0, _, err0 = cx.cr('unit', 'bc', '--kind', 'backend', '--files', 'backend/mod2.py', '--context', 'backend/helper.py')
     cx.script('claude', [{'edit': {'backend/mod2.py': 'X = 1' + chr(10)}}])
     rc, out, err = cx.cr('author-claude', 'bc', '--task-file', note(cx))
@@ -3172,6 +3196,11 @@ def t_claude_author():
           and all(x in perm['deny'] for x in ('Bash', 'Grep', 'Glob', 'Read(**/.env*)', 'Read(**/.ai/**)', 'Read(**/.git/**)'))
           and "tools='Read,Edit,Write'" in ca(cx)[0] and 'Grep' not in ca(cx)[0], (err0, err, perm))
     check('контекст автора передан в запросе из коммита (проверенный файл)', 'HELPER_MARK' in (cx.fake / 'claude-prompt-0.txt').read_text(encoding='utf-8'))
+    wd = cx.fake / 'calls.log'
+    line = [l_ for l_ in wd.read_text(encoding='utf-8').splitlines() if l_.startswith('claude-author')][0]
+    check('изоляция: автор работает во временной копии вне репозитория; в ней только проверенный контекст и файлы единицы из коммита (notes.txt, .env, прочее не видны)',
+          'cwdfiles=backend/helper.py' in line and str(cx.repo) not in line.split('incwd=')[1] and 'aq-author-' in line, line)
+    check('временная копия автора удалена после вызова', not Path(line.split('incwd=')[1].split(' cwdfiles=')[0]).exists(), line)
     sx = mixed_proj('ca-secret')
     sx.commit('backend/helper2.py', 'KEY = "ghp_' + 'a' * 24 + '"' + chr(10), 'secret ctx')
     sx.commit('backend/leaky.py', 'TOKEN = "ghp_' + 'b' * 24 + '"' + chr(10), 'secret in unit file')

@@ -1763,16 +1763,13 @@ SECRET_READ_DENY = ('**/.env*', '**/*.pem', '**/*.key', '**/secrets/**', '**/*.l
 
 
 def claude_author_settings(files, context_files):
-    """Права автора Claude: читать только файлы единицы и проверенный контекст (Grep/Glob не даются: они читают содержимое любых файлов), править только
-    файлы единицы; всё остальное в режиме dontAsk отклоняется, секретные пути запрещены явно (запрет приоритетнее разрешения)."""
+    """Права автора Claude. Главная граница чтения — изолированная временная копия (cwd): в ней лежат только файлы единицы и проверенный контекст, а
+    чтение вне cwd в режиме dontAsk отклоняется. Живая проверка показала, что внутри cwd dontAsk чтение разрешает и без правила allow, поэтому allow/deny —
+    второй слой: Read разрешён файлам единицы и контексту, Edit/Write — только файлам единицы, Grep/Glob/Bash/сеть и секретные пути запрещены явно."""
     read_ok = list(dict.fromkeys([*files, *context_files]))
     allow = [f'Read({f})' for f in read_ok] + [f'{tool}({f})' for f in files for tool in ('Edit', 'Write')]
     deny = ['Bash', 'PowerShell', 'WebFetch', 'WebSearch', 'Grep', 'Glob'] + [f'Read({pat})' for pat in SECRET_READ_DENY]
     return {'disableAllHooks': True, 'enableAllProjectMcpServers': False, 'enabledPlugins': {}, 'permissions': {'allow': allow, 'deny': deny}}
-
-
-def changed_paths(before, after):
-    return sorted(x for x in set(before) | set(after) if before.get(x) != after.get(x))
 
 
 def file_hash(root, x):
@@ -1780,53 +1777,58 @@ def file_hash(root, x):
     return sha(f.read_bytes()) if f.is_file() else None
 
 
-def launch_claude_author(profile, files, context_files, root):
+def workspace_files(work):
+    out = {}
+    for p in sorted(Path(work).rglob('*')):
+        if p.is_file():
+            out[p.relative_to(work).as_posix()] = p.read_bytes()
+    return out
+
+
+def launch_claude_author(profile, seed, files, context_files):
+    """seed — путь → байты файлов единицы (из HEAD) и проверенного контекста. Автор работает в ВРЕМЕННОЙ копии вне репозитория: репозитория, индекса, секретов
+    и прочих файлов он не видит. Сразу после завершения процесса (до сохранения ответа) копия файлов и их хеши записываются в каталог вызова; всё
+    остальное в репозиторий переносит доверенный код."""
     def go(d, prompt):
         claude = find_claude()
         need(claude, 'claude CLI не найден')
-        settings = claude_author_settings(files, context_files)
-        cmd = [*claude, '-p', '--model', profile['model'], '--effort', profile['effort'], '--output-format', 'json', '--tools', 'Read,Edit,Write',
-               '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--setting-sources', '',
-               '--settings', json.dumps(settings), '--disable-slash-commands', '--no-session-persistence', '--max-turns', '15',
-               '--system-prompt', CLAUDE_AUTHOR_SYSTEM]
-        out = spawn(cmd, d, prompt, 'claude-author', root, stdout_to='stdout.json')
-        # результат автора фиксируется хешами СРАЗУ после завершения процесса и ДО сохранения ответа (raw.txt): всё, что изменит дерево позже,
-        # повтор после обрыва обнаружит и не закоммитит
-        before = rjson(d / 'before.json')
-        wjson(d / 'result.json', {x: file_hash(root, x) for x in changed_paths(before, dirty_snapshot(root))})
-        if out.stat().st_size:
-            wtext(d / 'raw.txt', out.read_text(encoding='utf-8'))
+        work = Path(tempfile.mkdtemp(prefix='aq-author-'))
+        try:
+            for x, raw in seed.items():
+                f = work / x
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(raw)
+            cmd = [*claude, '-p', '--model', profile['model'], '--effort', profile['effort'], '--output-format', 'json', '--tools', 'Read,Edit,Write',
+                   '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--setting-sources', '',
+                   '--settings', json.dumps(claude_author_settings(files, context_files)), '--disable-slash-commands', '--no-session-persistence',
+                   '--max-turns', '15', '--system-prompt', CLAUDE_AUTHOR_SYSTEM]
+            out = spawn(cmd, d, prompt, 'claude-author', work, stdout_to='stdout.json')
+            got = workspace_files(work)
+            res_dir = d / 'result'
+            shutil.rmtree(res_dir, ignore_errors=True)
+            for x, raw in got.items():
+                f = res_dir / x
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(raw)
+            wjson(d / 'result.json', {x: sha(raw) for x, raw in got.items()})
+            if out.stat().st_size:
+                wtext(d / 'raw.txt', out.read_text(encoding='utf-8'))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
     return go
 
 
 def parse_claude_author(expect):
     def go(text):
         raw = json.loads(text)
-        need(not raw.get('is_error') and raw.get('subtype') == 'success', 'Claude-автор не вернул success (лимит ходов, ошибка или отказ): правки, если были, остались в '
-             'рабочем дереве без коммита; вызов израсходован, автоповтор запрещён')
+        need(not raw.get('is_error') and raw.get('subtype') == 'success', 'Claude-автор не вернул success (лимит ходов, ошибка или отказ): результат в репозиторий '
+             'не перенесён; вызов израсходован, автоповтор запрещён')
         used = list((raw.get('modelUsage') or {}))
         bad = model_mismatch(used, expect) if expect and used else []
-        need(not bad, f'MODEL: запрошена {expect} (поколение не ниже {MIN_GEN}), CLI сообщил {", ".join(used)}; не соответствуют: {", ".join(bad)} — правки автора не '
-             'приняты; вызов израсходован, автоповтор запрещён')
+        need(not bad, f'MODEL: запрошена {expect} (поколение не ниже {MIN_GEN}), CLI сообщил {", ".join(used)}; не соответствуют: {", ".join(bad)} — результат '
+             'автора не принят; вызов израсходован, автоповтор запрещён')
         return {'result': str(raw.get('result') or '')[:2000]}
     return go
-
-
-def dirty_snapshot(root):
-    """Состояние рабочего дерева: путь → [XY, sha256 содержимого]. Сравнение до и после вызова автора показывает, какие файлы он изменил."""
-    r = git(root, 'status', '--porcelain', '-z', '--untracked-files=all', check=False)
-    parts, snap, i = r.stdout.split('\0'), {}, 0
-    while i < len(parts):
-        e = parts[i]
-        i += 1
-        if len(e) < 4:
-            continue
-        xy, path = e[:2], e[3:]
-        if xy[0] in 'RC':
-            i += 1   # исходный путь переименования/копии
-        f = Path(root) / path
-        snap[path] = [xy, sha(f.read_bytes()) if f.is_file() else None]
-    return snap
 
 
 def round_commit(root, u, label):
@@ -1863,7 +1865,7 @@ def do_claude_author(task, uid, opts, note):
     d = task.dir / 'calls' / f'{uid}-author-{n}'
     label = f'aq:{task.s["id"]}/{uid}/a{n}'
     known = task.s['calls'].get(key)
-    ctx = []   # контекст нового запроса; при восстановлении (вызов уже сделан) запрос не строится
+    seed, ctx = {}, []   # содержимое временной копии и контекст нового запроса; при восстановлении (вызов уже сделан) запрос не строится
     done_sha = round_commit(root, u, label) if known else None   # коммит сделан, состояние не сохранено (обрыв): дописываем без нового вызова
     if done_sha:
         u['author_applied'] = n
@@ -1878,24 +1880,31 @@ def do_claude_author(task, uid, opts, note):
         need(not staged_names(root), 'в индексе есть подготовленные (staged) изменения: ' + ', '.join(staged_names(root)[:5]) +
              ' — коммит автора мог бы захватить чужую правку; закоммить или сними их (git restore --staged) до запуска автора')
         prof = choose_profile(task, uid, 'author', u['files'], opts)
-        for f in u['files']:   # автору не передаётся файл единицы, где уже есть похожее на секрет
+        base_unit = {}
+        for f in u['files']:   # файлы единицы берутся из коммита; с похожим на секрет — не передаются
             if git(root, 'ls-tree', 'HEAD', '--', f, check=False).stdout.strip():
-                need(not SECRET_RE.search(context_blob(root, 'HEAD', f)[0]), f'{f}: в файле единицы уже есть похожее на секрет — автору не передаётся')
+                text, h = context_blob(root, 'HEAD', f)
+                need(not SECRET_RE.search(text), f'{f}: в файле единицы уже есть похожее на секрет — автору не передаётся')
+                seed[f], base_unit[f] = text.encode('utf-8'), h
+            else:
+                base_unit[f] = None   # новый файл
         ctx = read_context(root, 'HEAD', u['context'], mod, rules)   # контекст — только проверенные файлы коммита (защита и секреты проверяются здесь)
+        for e in ctx:
+            seed[e['path']] = e['text'].encode('utf-8')
         d.mkdir(parents=True, exist_ok=True)
-        wjson(d / 'before.json', dirty_snapshot(root))   # до резерва вызова: сравнение «до/после» переживает обрыв
+        wjson(d / 'base.json', {'unit': base_unit, 'context': {e['path']: e['sha256'] for e in ctx}})   # до резерва вызова: сверка результата переживает обрыв
     ensure_registry(task, uid)
 
     def build():
-        parts = ['Ты — автор серверной части (Claude); репозиторий — текущий каталог.', f'Цель задачи: {task.s["goal"]}',
-                 f'Раунд автора: {n} (контрольная точка {DEFAULTS["author"]}).', requirements_line(task, uid)]
+        parts = ['Ты — автор серверной части (Claude). Рабочий каталог — изолированная копия: в ней только файлы единицы и контекст, остального репозитория нет.',
+                 f'Цель задачи: {task.s["goal"]}', f'Раунд автора: {n} (контрольная точка {DEFAULTS["author"]}).', requirements_line(task, uid)]
         if task.s['contract']:
             parts.append('Общий контракт (менять нельзя):\n' + task.s['contract'])
         if u['spec']:
             parts.append('Спецификация единицы:\n' + u['spec'])
         parts.append('Задание тимлида:\n' + note)
-        parts.append('Менять можно ТОЛЬКО эти файлы: ' + ', '.join(u['files']) + '. Читать можно только их и файлы контекста ниже: остальные файлы '
-                     'недоступны (если нужен ещё файл — назови его в итоговом тексте). Прочитай файлы единицы инструментом Read, внеси правки, файлы не удаляй, не коммить.')
+        parts.append('Менять можно ТОЛЬКО эти файлы: ' + ', '.join(u['files']) + ' (новый файл создавай по этому же пути). Читать можно только их и файлы контекста ниже; '
+                     'если нужен ещё файл — назови его в итоговом тексте. Прочитай файлы единицы инструментом Read, внеси правки, файлы не удаляй, не коммить.')
         parts += context_sections(ctx)
         parts.append(RULES_BLOCK)
         if u['rethinks']:
@@ -1904,37 +1913,41 @@ def do_claude_author(task, uid, opts, note):
             parts.append(findings_block(u) + '\n(исправь BLOCKER и MAJOR; не согласен — скажи в итоговом тексте, почему)')
         return '\n\n'.join(parts), {'profile': prof}
 
-    res = model_call(task, uid, 'author', n, 'claude-author', build, launch_claude_author(prof, u['files'], [e['path'] for e in ctx], root), parse_claude_author(prof['model']),
-                     subject={'author': n})
-    before = rjson(d / 'before.json')
-    after = dirty_snapshot(root)
-    changed = changed_paths(before, after)
-    rf = d / 'result.json'
+    res = model_call(task, uid, 'author', n, 'claude-author', build, launch_claude_author(prof, seed, u['files'], [e['path'] for e in ctx]),
+                     parse_claude_author(prof['model']), subject={'author': n})
+    base, rf = rjson(d / 'base.json'), d / 'result.json'
     need(rf.is_file(), f'{key}: нет записи результата автора (result.json) — повтор запрещён, см. {d}')
-    recorded = rjson(rf)
-    need(set(changed) == set(recorded) and all(file_hash(root, x) == h for x, h in recorded.items()),
-         'содержимое файлов изменено или набор изменённых путей расходится с зафиксированным сразу после работы автора (хеши результата): ' +
-         ', '.join(sorted(set(changed) ^ set(recorded) | {x for x, h in recorded.items() if file_hash(root, x) != h})[:5]) +
-         ' — коммита нет, вызов израсходован; разбор тимлидом')
-    own = {canon(f) for f in u['files']}
-    outside = [x for x in changed if canon(x) not in own]
-    need(not outside, 'автор Claude изменил файлы вне списка единицы: ' + ', '.join(outside[:5]) + ' — изменения оставлены в рабочем дереве для разбора тимлидом, '
-         'коммита нет, вызов израсходован')
+    recorded, res_dir = rjson(rf), d / 'result'
+    for x, h in recorded.items():   # сохранённая копия результата не менялась после записи
+        need((res_dir / x).is_file() and sha((res_dir / x).read_bytes()) == h, f'{x}: сохранённый результат автора изменён после записи (хеши результата) — разбор тимлидом')
+    allowed = set(u['files']) | set(base['context'])
+    extra = [x for x in recorded if x not in allowed]
+    need(not extra, 'автор Claude создал файлы вне списка единицы и контекста: ' + ', '.join(sorted(extra)[:5]) + ' — результат не применён (репозиторий не тронут), вызов израсходован')
+    bad_ctx = [x for x, h in base['context'].items() if recorded.get(x) != h]
+    need(not bad_ctx, 'автор Claude изменил или удалил файлы контекста: ' + ', '.join(bad_ctx[:5]) + ' — результат не применён')
+    gone = [f for f, h in base['unit'].items() if h is not None and f not in recorded]
+    need(not gone, 'удаление или переименование файла запрещено: ' + ', '.join(gone[:5]) + ' — результат не применён')
+    changed = sorted(f for f in u['files'] if f in recorded and recorded[f] != base['unit'].get(f))
     need(changed, 'пустая правка: автор Claude не изменил ни одного файла единицы')
     for x in changed:
-        f = Path(root) / x
-        nolink(root, x, 'файл')
-        need(f.is_file(), f'{x}: удаление или переименование файла запрещено')
-        raw = f.read_bytes()
+        raw = (res_dir / x).read_bytes()
         need(len(raw) <= MAX_FILE, f'{x}: файл больше {MAX_FILE} байт')
-        text = raw.decode('utf-8', errors='replace')
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            raise Blocked(f'{x}: не UTF-8') from None
         need(not HIDDEN_RE.search(text), f'{x}: скрытые/управляющие символы')
         need(not SECRET_RE.search(text), f'{x}: похоже на секрет')
-    # до вызова индекс был пуст, поэтому staged-пути ЕДИНИЦЫ — правки автора (в том числе его собственный staging после обрыва между add и commit,
-    # повтор его завершает); посторонние staged-пути — чужая правка, коммита нет
-    foreign = [x for x in staged_names(root) if canon(x) not in own]
+        cur = file_hash(root, x)   # репозиторий: либо исходное состояние, либо уже применённый результат (повтор после обрыва); иное — чужая правка
+        need(cur in (base['unit'].get(x), recorded[x]), f'{x}: в репозитории файл изменён вне агента и не совпадает ни с исходным, ни с результатом автора (хеши результата) — коммита нет')
+    foreign = [x for x in staged_names(root) if x not in u['files']]
     need(not foreign, 'в индексе есть подготовленные (staged) изменения вне файлов единицы: ' + ', '.join(foreign[:5]) +
-         ' — коммита нет (чужая правка не должна попасть в коммит автора); правки автора остались в рабочем дереве')
+         ' — коммита нет (чужая правка не должна попасть в коммит автора); результат автора сохранён в ' + str(res_dir))
+    for x in changed:   # перенос результата в репозиторий доверенным кодом (идемпотентно: уже применённое не переписывается)
+        if file_hash(root, x) != recorded[x]:
+            nolink(root, x, 'файл')
+            (Path(root) / x).parent.mkdir(parents=True, exist_ok=True)
+            (Path(root) / x).write_bytes((res_dir / x).read_bytes())
     git(root, 'add', '--', *changed)
     git(root, '-c', 'user.name=agent-claude', '-c', 'user.email=agent-claude@users.noreply.local', 'commit', '-m',
         f'chore(agentq): {uid} claude author round {n} [{label}]', '--', *changed)   # --only: только перечисленные пути, а не весь индекс
