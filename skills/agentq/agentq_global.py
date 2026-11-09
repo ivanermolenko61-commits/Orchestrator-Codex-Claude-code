@@ -1893,7 +1893,10 @@ def do_claude_author(task, uid, opts, note):
         text = raw.decode('utf-8', errors='replace')
         need(not HIDDEN_RE.search(text), f'{x}: скрытые/управляющие символы')
         need(not SECRET_RE.search(text), f'{x}: похоже на секрет')
-    need(not staged_names(root), 'в индексе появились подготовленные (staged) изменения во время работы автора: ' + ', '.join(staged_names(root)[:5]) +
+    # до вызова индекс был пуст, поэтому staged-пути ЕДИНИЦЫ — правки автора (в том числе его собственный staging после обрыва между add и commit,
+    # повтор его завершает); посторонние staged-пути — чужая правка, коммита нет
+    foreign = [x for x in staged_names(root) if canon(x) not in own]
+    need(not foreign, 'в индексе есть подготовленные (staged) изменения вне файлов единицы: ' + ', '.join(foreign[:5]) +
          ' — коммита нет (чужая правка не должна попасть в коммит автора); правки автора остались в рабочем дереве')
     git(root, 'add', '--', *changed)
     git(root, '-c', 'user.name=agent-claude', '-c', 'user.email=agent-claude@users.noreply.local', 'commit', '-m',

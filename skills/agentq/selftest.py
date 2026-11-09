@@ -3120,6 +3120,28 @@ def t_claude_author():
     rc, out, err = lt.cr('author-claude', 'be', '--task-file', note(lt))
     check('восстановление: коммит раунда найден по метке в истории, хотя после него есть чужой коммит — без нового вызова Claude',
           rc == 0 and len(ca(lt)) == 1 and 'вызов не повторялся' in out and rstate(lt)['units']['be']['author_applied'] == 1, out + err)
+    # обрыв между git add и commit: ответ сохранён, правки автора подготовлены (staged), коммита нет
+    sc_ = mixed_proj('ca-stage-crash')
+    sc_.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    sc_.cr('author-claude', 'be', '--task-file', note(sc_))
+    sc_.git('reset', '--soft', 'HEAD~1')   # состояние сразу после git add: правки в индексе, коммита нет
+    state_edit(sc_, lambda s_: s_['units']['be'].update(author_applied=0))
+    rc, out, err = sc_.cr('author-claude', 'be', '--task-file', note(sc_))
+    check('обрыв между git add и commit: повтор завершает применение сохранённого ответа без нового вызова Claude, чужого в коммит не берёт',
+          rc == 0 and len(ca(sc_)) == 1 and 'aq:ca-stage-crash/be/a1' in sc_.git('log', '-1', '--format=%s') and not sc_.git('status', '--porcelain')
+          and sc_.git('show', '--name-only', '--format=', 'HEAD') == 'backend/app.py' and rstate(sc_)['units']['be']['author_applied'] == 1, out + err)
+    sf = mixed_proj('ca-stage-foreign')
+    sf.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    sf.cr('author-claude', 'be', '--task-file', note(sf))
+    sf.git('reset', '--soft', 'HEAD~1')
+    (sf.repo / 'package.json').write_text('{"foreign": 1}', encoding='utf-8')
+    sf.git('add', 'package.json')   # к собственному staging автора добавилась чужая правка
+    state_edit(sf, lambda s_: s_['units']['be'].update(author_applied=0))
+    h1 = head(sf)
+    rc, _, err = sf.cr('author-claude', 'be', '--task-file', note(sf))
+    check('обрыв между add и commit + чужой staged-файл: отказ, коммита нет, чужая правка не захвачена, Claude заново не вызывался',
+          rc == 2 and ('вне файлов единицы' in err or 'вне списка' in err) and head(sf) == h1 and len(ca(sf)) == 1
+          and sf.git('diff', '--cached', '--name-only').split() == ['backend/app.py', 'package.json'], err)
 
 
 def main():
