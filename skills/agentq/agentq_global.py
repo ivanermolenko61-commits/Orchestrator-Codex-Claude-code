@@ -13,7 +13,7 @@
   author <uid> [low|medium|high] [--wait СЕК]   один вызов Codex-автора (frontend-единица); --wait: ждать готовности --after без расхода
   cycle <uid> [low|medium|high] [--wait СЕК]    frontend: автор -> проверки -> ревью -> исправления до PASS/лимита
   review [uid] [low|medium|high] [--full]   независимое ревью другим сервисом
-  profile <uid> author|review   профиль Claude (модель/effort) по политике: показать и записать, без вызова модели
+  profile <uid> author|review   предпросмотр профиля Claude (модель/effort) по политике, без вызова модели (журнал не меняет; --applied — сообщённое применение)
   author-claude <uid> --task-file F   автор Claude (backend-единица со списком файлов): реальный запуск claude -p с профилем по политике, коммит только файлов единицы
   escalate <uid> author|review --cause quality "<основание>"   повысить профиль Claude на ступень при подтверждённой нехватке качества
                                 (review/cycle принимают --complexity --risk --model --reason: признаки и ручной выбор профиля Claude)
@@ -1759,18 +1759,41 @@ CLAUDE_AUTHOR_SYSTEM = ('Ты исполнитель серверной част
                         'В конце коротко перечисли, что изменено и что выполнить не удалось.')
 
 
-def launch_claude_author(profile, files, root):
+SECRET_READ_DENY = ('**/.env*', '**/*.pem', '**/*.key', '**/secrets/**', '**/*.lock', '**/package-lock.json', '**/.git/**', '**/.ai/**')
+
+
+def claude_author_settings(files, context_files):
+    """Права автора Claude: читать только файлы единицы и проверенный контекст (Grep/Glob не даются: они читают содержимое любых файлов), править только
+    файлы единицы; всё остальное в режиме dontAsk отклоняется, секретные пути запрещены явно (запрет приоритетнее разрешения)."""
+    read_ok = list(dict.fromkeys([*files, *context_files]))
+    allow = [f'Read({f})' for f in read_ok] + [f'{tool}({f})' for f in files for tool in ('Edit', 'Write')]
+    deny = ['Bash', 'PowerShell', 'WebFetch', 'WebSearch', 'Grep', 'Glob'] + [f'Read({pat})' for pat in SECRET_READ_DENY]
+    return {'disableAllHooks': True, 'enableAllProjectMcpServers': False, 'enabledPlugins': {}, 'permissions': {'allow': allow, 'deny': deny}}
+
+
+def changed_paths(before, after):
+    return sorted(x for x in set(before) | set(after) if before.get(x) != after.get(x))
+
+
+def file_hash(root, x):
+    f = Path(root) / x
+    return sha(f.read_bytes()) if f.is_file() else None
+
+
+def launch_claude_author(profile, files, context_files, root):
     def go(d, prompt):
         claude = find_claude()
         need(claude, 'claude CLI не найден')
-        allow = [f'{tool}({f})' for f in files for tool in ('Edit', 'Write')] + ['Read', 'Grep', 'Glob']
-        settings = {'disableAllHooks': True, 'enableAllProjectMcpServers': False, 'enabledPlugins': {},
-                    'permissions': {'allow': allow, 'deny': ['Bash', 'PowerShell', 'WebFetch', 'WebSearch']}}
-        cmd = [*claude, '-p', '--model', profile['model'], '--effort', profile['effort'], '--output-format', 'json', '--tools', 'Read,Edit,Write,Grep,Glob',
+        settings = claude_author_settings(files, context_files)
+        cmd = [*claude, '-p', '--model', profile['model'], '--effort', profile['effort'], '--output-format', 'json', '--tools', 'Read,Edit,Write',
                '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--setting-sources', '',
                '--settings', json.dumps(settings), '--disable-slash-commands', '--no-session-persistence', '--max-turns', '15',
                '--system-prompt', CLAUDE_AUTHOR_SYSTEM]
         out = spawn(cmd, d, prompt, 'claude-author', root, stdout_to='stdout.json')
+        # результат автора фиксируется хешами СРАЗУ после завершения процесса и ДО сохранения ответа (raw.txt): всё, что изменит дерево позже,
+        # повтор после обрыва обнаружит и не закоммитит
+        before = rjson(d / 'before.json')
+        wjson(d / 'result.json', {x: file_hash(root, x) for x in changed_paths(before, dirty_snapshot(root))})
         if out.stat().st_size:
             wtext(d / 'raw.txt', out.read_text(encoding='utf-8'))
     return go
@@ -1840,6 +1863,7 @@ def do_claude_author(task, uid, opts, note):
     d = task.dir / 'calls' / f'{uid}-author-{n}'
     label = f'aq:{task.s["id"]}/{uid}/a{n}'
     known = task.s['calls'].get(key)
+    ctx = []   # контекст нового запроса; при восстановлении (вызов уже сделан) запрос не строится
     done_sha = round_commit(root, u, label) if known else None   # коммит сделан, состояние не сохранено (обрыв): дописываем без нового вызова
     if done_sha:
         u['author_applied'] = n
@@ -1854,6 +1878,10 @@ def do_claude_author(task, uid, opts, note):
         need(not staged_names(root), 'в индексе есть подготовленные (staged) изменения: ' + ', '.join(staged_names(root)[:5]) +
              ' — коммит автора мог бы захватить чужую правку; закоммить или сними их (git restore --staged) до запуска автора')
         prof = choose_profile(task, uid, 'author', u['files'], opts)
+        for f in u['files']:   # автору не передаётся файл единицы, где уже есть похожее на секрет
+            if git(root, 'ls-tree', 'HEAD', '--', f, check=False).stdout.strip():
+                need(not SECRET_RE.search(context_blob(root, 'HEAD', f)[0]), f'{f}: в файле единицы уже есть похожее на секрет — автору не передаётся')
+        ctx = read_context(root, 'HEAD', u['context'], mod, rules)   # контекст — только проверенные файлы коммита (защита и секреты проверяются здесь)
         d.mkdir(parents=True, exist_ok=True)
         wjson(d / 'before.json', dirty_snapshot(root))   # до резерва вызова: сравнение «до/после» переживает обрыв
     ensure_registry(task, uid)
@@ -1866,7 +1894,9 @@ def do_claude_author(task, uid, opts, note):
         if u['spec']:
             parts.append('Спецификация единицы:\n' + u['spec'])
         parts.append('Задание тимлида:\n' + note)
-        parts.append('Менять можно ТОЛЬКО эти файлы: ' + ', '.join(u['files']) + '. Прочитай их инструментом Read, внеси правки, файлы не удаляй, не коммить.')
+        parts.append('Менять можно ТОЛЬКО эти файлы: ' + ', '.join(u['files']) + '. Читать можно только их и файлы контекста ниже: остальные файлы '
+                     'недоступны (если нужен ещё файл — назови его в итоговом тексте). Прочитай файлы единицы инструментом Read, внеси правки, файлы не удаляй, не коммить.')
+        parts += context_sections(ctx)
         parts.append(RULES_BLOCK)
         if u['rethinks']:
             parts.append('Тимлид пересмотрел подход после кругов без прогресса: ' + u['rethinks'][-1]['note'])
@@ -1874,11 +1904,18 @@ def do_claude_author(task, uid, opts, note):
             parts.append(findings_block(u) + '\n(исправь BLOCKER и MAJOR; не согласен — скажи в итоговом тексте, почему)')
         return '\n\n'.join(parts), {'profile': prof}
 
-    res = model_call(task, uid, 'author', n, 'claude-author', build, launch_claude_author(prof, u['files'], root), parse_claude_author(prof['model']),
+    res = model_call(task, uid, 'author', n, 'claude-author', build, launch_claude_author(prof, u['files'], [e['path'] for e in ctx], root), parse_claude_author(prof['model']),
                      subject={'author': n})
     before = rjson(d / 'before.json')
     after = dirty_snapshot(root)
-    changed = sorted(x for x in set(before) | set(after) if before.get(x) != after.get(x))
+    changed = changed_paths(before, after)
+    rf = d / 'result.json'
+    need(rf.is_file(), f'{key}: нет записи результата автора (result.json) — повтор запрещён, см. {d}')
+    recorded = rjson(rf)
+    need(set(changed) == set(recorded) and all(file_hash(root, x) == h for x, h in recorded.items()),
+         'содержимое файлов изменено или набор изменённых путей расходится с зафиксированным сразу после работы автора (хеши результата): ' +
+         ', '.join(sorted(set(changed) ^ set(recorded) | {x for x, h in recorded.items() if file_hash(root, x) != h})[:5]) +
+         ' — коммита нет, вызов израсходован; разбор тимлидом')
     own = {canon(f) for f in u['files']}
     outside = [x for x in changed if canon(x) not in own]
     need(not outside, 'автор Claude изменил файлы вне списка единицы: ' + ', '.join(outside[:5]) + ' — изменения оставлены в рабочем дереве для разбора тимлидом, '
@@ -2986,10 +3023,11 @@ def cmd_profile(a):
     if a.applied:
         need(not SECRET_RE.search(a.applied), 'в тексте найдено похожее на секрет')
         ev['applied_reported'] = a.applied[:200]
-    if a.role == 'author':   # применение профиля reviewer видно по вызову (запись резерва и modelUsage), отдельная запись не нужна
+    if a.applied:   # предпросмотр журнал не меняет (кроме признаков координатора); фактический запуск сам пишет профиль и причину в запись вызова
         route_event(t, a.uid, **ev)
     t.save()
-    say(f'ПРОФИЛЬ {a.role} {a.uid}: {prof["model"]}/{prof["effort"]} — {prof["source"]}; {prof["reason"]} (Claude CLI {prof["cli"]}).')
+    say(f'ПРОФИЛЬ {a.role} {a.uid}: {prof["model"]}/{prof["effort"]} — {prof["source"]}; {prof["reason"]} (Claude CLI {prof["cli"]}). '
+        'Предпросмотр: журнал не меняется (сохраняются только признаки --complexity/--risk и сообщённое --applied); при запуске профиль и причина пишутся в запись вызова.')
     if a.role == 'author':
         say(f'Запуск автора движком: author-claude {a.uid} --task-file F (claude -p --model {prof["model"]} --effort {prof["effort"]}). Основной чат тимлида и '
             'coder-субагента движок сам не переключает: в этих путях смена модели выполняется вручную (/model, Agent model=…) и в журнале помечается '
@@ -3021,13 +3059,18 @@ def cmd_escalate(a):
     need(done < MAX_ESCALATIONS, f'уже {done} эскалации роли {a.role} в этой единице (предел {MAX_ESCALATIONS}): решает Иван — сузить требования или принять остаток')
     names = list(u['files']) or ([] if not u['base'] else git(t.root, 'diff', '--no-ext-diff', '--name-only', f'{u["base"]}..HEAD').splitlines())
     cur = choose_profile(t, a.uid, a.role, names)
-    nxt = next_step((cur['model'], cur['effort']))
-    need(nxt, f'выше {cur["model"]}/{cur["effort"]} ступеней нет: решает Иван')
+    base = (cur['model'], cur['effort'])
+    last = max((c for c in t.s['calls'].values() if c['unit'] == a.uid and c['role'] == a.role and c.get('kind') in CLAUDE_KINDS and c.get('profile')),
+               key=lambda c: c['n'], default=None)   # профиль вызова, доказавшего нехватку качества (он мог быть задан вручную выше политики)
+    if last and step_key((last['profile']['model'], last['profile']['effort'])) > step_key(base):
+        base = (last['profile']['model'], last['profile']['effort'])
+    nxt = next_step(base)
+    need(nxt, f'выше {base[0]}/{base[1]} ступеней нет: решает Иван (сузить требования или принять остаток)')
     u['route']['floor'][a.role] = list(nxt)
-    u['route']['esc'].append({'at': time.time(), 'event': 'escalated', 'role': a.role, 'from': f'{cur["model"]}/{cur["effort"]}', 'to': f'{nxt[0]}/{nxt[1]}',
+    u['route']['esc'].append({'at': time.time(), 'event': 'escalated', 'role': a.role, 'from': f'{base[0]}/{base[1]}', 'to': f'{nxt[0]}/{nxt[1]}',
                               'evidence': ev, 'note': note})
     t.save()
-    say(f'Эскалация {a.role} {a.uid}: {cur["model"]}/{cur["effort"]} → {nxt[0]}/{nxt[1]}. Основание: {"; ".join(ev)}. Бюджет вызовов и история не изменены.')
+    say(f'Эскалация {a.role} {a.uid}: {base[0]}/{base[1]} → {nxt[0]}/{nxt[1]}. Основание: {"; ".join(ev)}. Бюджет вызовов и история не изменены.')
     return 0
 
 
@@ -3213,7 +3256,7 @@ def main(argv=None):
     s.add_argument('rest', nargs='*')
     s.add_argument('--full', action='store_true')
     route_args(s)
-    s = sub.add_parser('profile', help='профиль Claude для роли единицы: показать выбор и записать (без вызова модели)')
+    s = sub.add_parser('profile', help='предпросмотр профиля Claude для роли единицы (без вызова модели; фактический запуск сам сохраняет профиль и причину)')
     s.add_argument('uid')
     s.add_argument('role', choices=('author', 'review'))
     s.add_argument('--effort', choices=EFFORTS)

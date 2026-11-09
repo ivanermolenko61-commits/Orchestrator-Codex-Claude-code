@@ -94,6 +94,7 @@ with (d / 'calls.log').open('a') as f:
             ' effort=' + a[a.index('--effort') + 1] + ' leak=' + ','.join(leak) + ' fallback=' + str('--fallback-model' in a) +
             ' mode=' + (a[a.index('--permission-mode') + 1] if '--permission-mode' in a else '-') + '\n')
 (d / f'claude-prompt-{n}.txt').write_text(prompt, encoding='utf-8')
+(d / f'claude-settings-{n}.json').write_text(a[a.index('--settings') + 1], encoding='utf-8')
 sc = json.loads((d / 'claude.json').read_text())[n]
 if '--json-schema' in a:
     out = {'is_error': False, 'subtype': 'success', 'structured_output': sc}
@@ -2857,7 +2858,8 @@ def t_model_routing():
     out = p.cr('profile', 'be', 'author', '--complexity', 'standard', '--applied', 'claude-sonnet-5-5 (по /model)')[1]
     st = p.cr('status')[1]
     check('автор: применение подтверждено только как «сообщено тимлидом»; основной чат движок не переключает',
-          'движок сам не переключает' in out and 'author-claude be --task-file' in out and 'сообщено тимлидом — claude-sonnet-5-5' in st and 'не подтверждено' in st, out + st)
+          'движок сам не переключает' in out and 'author-claude be --task-file' in out and 'сообщено тимлидом — claude-sonnet-5-5' in st and 'не подтверждено' not in st
+          and 'Предпросмотр' in out and rstate(p)['units']['fe']['route']['log'] == [] and len(rstate(p)['units']['be']['route']['log']) == 1, out + st)
 
     # --- реальные argv, окружение и фактическая модель
     q = mixed_proj('rt-argv')
@@ -2998,6 +3000,21 @@ def t_model_routing():
     rc, _, err = x.cr('escalate', 'fe', 'review', '--cause', 'quality', 'третья ступень по подтверждённой нехватке качества')
     check('третья эскалация отклонена: решает Иван; лимит не зависит от усечения журнала профилей', rc == 2 and 'предел' in err, err)
 
+    # --- эскалация отталкивается от профиля вызова-основания
+    for label, eff, want in (('rt-esc-top', 'high', None), ('rt-esc-mid', 'medium', 'opus/medium → opus/high')):
+        z = mixed_proj(label)
+        z.script('codex', [{'files': FILES_OK1}])
+        z.script('claude', [UNC])
+        z.cr('author', 'fe')
+        rc, _, _ = z.cr('review', 'fe', eff, '--model', 'opus', '--reason', 'ручной выбор для проверки основания эскалации')
+        rc2, out, err = z.cr('escalate', 'fe', 'review', '--cause', 'quality', 'контекст проверен, сеть и квота в порядке, ответ неопределённый')
+        if want is None:
+            check('эскалация после ручного opus/high: более высокой ступени нет (политика standard sonnet/medium не используется как основание)',
+                  rc == 1 and rc2 == 2 and 'ступеней нет' in err and 'opus/high' in err and not rstate(z)['units']['fe']['route']['floor'], err)
+        else:
+            check('эскалация после ручного opus/medium: основание — профиль вызова, ступень opus/high, а не sonnet/high',
+                  rc == 1 and rc2 == 0 and want in out and rstate(z)['units']['fe']['route']['floor'].get('review') == ['opus', 'high'], out + err)
+
     # --- журнал и продолжение
     rc, _, _ = x.cr('finish', '--abandon')
     led = rledger(x)[-1]['unit_meta']['fe']['route']
@@ -3027,7 +3044,7 @@ def t_claude_author():
     p.script('claude', [{'edit': {'backend/app.py': APP_C}, 'text': 'готово: комментарий добавлен'}])
     rc, out, err = p.cr('author-claude', 'be', '--task-file', note(p), env={'CLAUDE_CODE_EFFORT_LEVEL': 'low', 'ANTHROPIC_MODEL': 'haiku'})
     check('автор Claude: реальный запуск claude -p с профилем sonnet/medium, инструменты без Bash, режим dontAsk, окружение очищено',
-          rc == 0 and len(ca(p)) == 1 and 'model=sonnet ' in ca(p)[0] and 'effort=medium' in ca(p)[0] and "tools='Read,Edit,Write,Grep,Glob'" in ca(p)[0]
+          rc == 0 and len(ca(p)) == 1 and 'model=sonnet ' in ca(p)[0] and 'effort=medium' in ca(p)[0] and "tools='Read,Edit,Write'" in ca(p)[0]
           and 'mode=dontAsk' in ca(p)[0] and 'leak= ' in ca(p)[0] + ' ' and 'nosession=True' in ca(p)[0], out + err + str(p.calls()))
     check('автор Claude: коммит только файла единицы с меткой раунда, автор коммита agent-claude',
           'aq:ca-ok/be/a1' in p.git('log', '-1', '--format=%s') and 'agent-claude' in p.git('log', '-1', '--format=%an')
@@ -3140,8 +3157,43 @@ def t_claude_author():
     h1 = head(sf)
     rc, _, err = sf.cr('author-claude', 'be', '--task-file', note(sf))
     check('обрыв между add и commit + чужой staged-файл: отказ, коммита нет, чужая правка не захвачена, Claude заново не вызывался',
-          rc == 2 and ('вне файлов единицы' in err or 'вне списка' in err) and head(sf) == h1 and len(ca(sf)) == 1
+          rc == 2 and ('вне файлов единицы' in err or 'вне списка' in err or 'хеши результата' in err) and head(sf) == h1 and len(ca(sf)) == 1
           and sf.git('diff', '--cached', '--name-only').split() == ['backend/app.py', 'package.json'], err)
+
+    # чтение: только файлы единицы и проверенный контекст; Grep/Glob и секретные пути не даются
+    cx = mixed_proj('ca-ctx')
+    cx.commit('backend/helper.py', 'HELPER_MARK = 1' + chr(10), 'helper')
+    rc0, _, err0 = cx.cr('unit', 'bc', '--kind', 'backend', '--files', 'backend/mod2.py', '--context', 'backend/helper.py')
+    cx.script('claude', [{'edit': {'backend/mod2.py': 'X = 1' + chr(10)}}])
+    rc, out, err = cx.cr('author-claude', 'bc', '--task-file', note(cx))
+    perm = json.loads((cx.fake / 'claude-settings-0.json').read_text(encoding='utf-8'))['permissions']
+    check('права автора: Read только у файла единицы и контекста, Edit/Write только у файла единицы, нет общего Read, Grep, Glob и Bash',
+          rc0 == 0 and rc == 0 and perm['allow'] == ['Read(backend/mod2.py)', 'Read(backend/helper.py)', 'Edit(backend/mod2.py)', 'Write(backend/mod2.py)']
+          and all(x in perm['deny'] for x in ('Bash', 'Grep', 'Glob', 'Read(**/.env*)', 'Read(**/.ai/**)', 'Read(**/.git/**)'))
+          and "tools='Read,Edit,Write'" in ca(cx)[0] and 'Grep' not in ca(cx)[0], (err0, err, perm))
+    check('контекст автора передан в запросе из коммита (проверенный файл)', 'HELPER_MARK' in (cx.fake / 'claude-prompt-0.txt').read_text(encoding='utf-8'))
+    sx = mixed_proj('ca-secret')
+    sx.commit('backend/helper2.py', 'KEY = "ghp_' + 'a' * 24 + '"' + chr(10), 'secret ctx')
+    sx.commit('backend/leaky.py', 'TOKEN = "ghp_' + 'b' * 24 + '"' + chr(10), 'secret in unit file')
+    sx.cr('unit', 'sc', '--kind', 'backend', '--files', 'backend/mod3.py', '--context', 'backend/helper2.py')
+    sx.cr('unit', 'sl', '--kind', 'backend', '--files', 'backend/leaky.py')
+    rs1, _, es1 = sx.cr('author-claude', 'sc', '--task-file', note(sx))
+    rs2, _, es2 = sx.cr('author-claude', 'sl', '--task-file', note(sx))
+    check('секрет в контексте или в файле единицы: автор не запускается (ДО вызова Claude), содержимое не передаётся',
+          rs1 == rs2 == 2 and 'секрет' in es1 and 'секрет' in es2 and not ca(sx), es1 + es2)
+
+    # хеши результата: содержимое, изменённое после работы автора, не коммитится при повторе
+    hs = mixed_proj('ca-hash')
+    hs.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    hs.cr('author-claude', 'be', '--task-file', note(hs))
+    hs.git('reset', '--soft', 'HEAD~1')   # состояние после git add: правки автора подготовлены, коммита нет
+    (hs.repo / 'backend/app.py').write_text(APP_C + '# после автора' + chr(10), encoding='utf-8')
+    hs.git('add', 'backend/app.py')
+    state_edit(hs, lambda s_: s_['units']['be'].update(author_applied=0))
+    h1 = head(hs)
+    rc, _, err = hs.cr('author-claude', 'be', '--task-file', note(hs))
+    check('повтор после обрыва: содержимое файла изменено после работы автора — отказ по хешам результата, коммита нет, Claude заново не вызывался',
+          rc == 2 and 'хеши результата' in err and head(hs) == h1 and len(ca(hs)) == 1, err)
 
 
 def main():
