@@ -1806,6 +1806,24 @@ def dirty_snapshot(root):
     return snap
 
 
+def round_commit(root, u, label):
+    """Коммит раунда автора Claude по метке во всей истории единицы (после него могли появиться чужие коммиты). Принимается, только если его автор
+    agent-claude и он затрагивает лишь файлы единицы; иное — остановка, а не молчаливое восстановление."""
+    r = git(root, 'log', '--fixed-strings', f'--grep=[{label}]', '--format=%H', '-n', '1', f'{u["base"]}..HEAD', check=False)
+    found = r.stdout.strip() if r.returncode == 0 else ''
+    if not found:
+        return None
+    names = git(root, 'diff-tree', '--no-commit-id', '--name-only', '-r', found).splitlines()
+    own = {canon(f) for f in u['files']}
+    need(git(root, 'log', '-1', '--format=%an', found) == 'agent-claude' and names and all(canon(x) in own for x in names),
+         f'коммит {found[:10]} с меткой {label} затрагивает не только файлы единицы или сделан не автором agent-claude — восстановление отказано, решает тимлид')
+    return found
+
+
+def staged_names(root):
+    return git(root, 'diff', '--cached', '--name-only').splitlines()
+
+
 def do_claude_author(task, uid, opts, note):
     root, u = task.root, task.unit(uid)
     need(u['kind'] == 'backend' and u['files'], f'{uid}: автора Claude движок запускает только для backend-единицы со списком файлов (клиентский код пишет Codex, '
@@ -1822,16 +1840,19 @@ def do_claude_author(task, uid, opts, note):
     d = task.dir / 'calls' / f'{uid}-author-{n}'
     label = f'aq:{task.s["id"]}/{uid}/a{n}'
     known = task.s['calls'].get(key)
-    if known and label in git(root, 'log', '-1', '--format=%s'):   # коммит сделан, состояние не сохранено (обрыв): дописываем без нового вызова
+    done_sha = round_commit(root, u, label) if known else None   # коммит сделан, состояние не сохранено (обрыв): дописываем без нового вызова
+    if done_sha:
         u['author_applied'] = n
         task.save()
-        say(f'Автор Claude, раунд {n}: коммит {git(root, "rev-parse", "HEAD")[:10]} уже сделан, состояние дописано (вызов не повторялся).')
+        say(f'Автор Claude, раунд {n}: коммит {done_sha[:10]} уже сделан, состояние дописано (вызов не повторялся).')
         return n
     if known:
         prof = known.get('profile')
         need(prof, f'{key}: в записи вызова нет профиля — повтор запрещён, см. {d}')
     else:
         need(not git(root, 'status', '--porcelain', '--', *u['files']), 'файлы единицы изменены вне агента: закоммить или откати до запуска автора')
+        need(not staged_names(root), 'в индексе есть подготовленные (staged) изменения: ' + ', '.join(staged_names(root)[:5]) +
+             ' — коммит автора мог бы захватить чужую правку; закоммить или сними их (git restore --staged) до запуска автора')
         prof = choose_profile(task, uid, 'author', u['files'], opts)
         d.mkdir(parents=True, exist_ok=True)
         wjson(d / 'before.json', dirty_snapshot(root))   # до резерва вызова: сравнение «до/после» переживает обрыв
@@ -1872,9 +1893,11 @@ def do_claude_author(task, uid, opts, note):
         text = raw.decode('utf-8', errors='replace')
         need(not HIDDEN_RE.search(text), f'{x}: скрытые/управляющие символы')
         need(not SECRET_RE.search(text), f'{x}: похоже на секрет')
+    need(not staged_names(root), 'в индексе появились подготовленные (staged) изменения во время работы автора: ' + ', '.join(staged_names(root)[:5]) +
+         ' — коммита нет (чужая правка не должна попасть в коммит автора); правки автора остались в рабочем дереве')
     git(root, 'add', '--', *changed)
     git(root, '-c', 'user.name=agent-claude', '-c', 'user.email=agent-claude@users.noreply.local', 'commit', '-m',
-        f'chore(agentq): {uid} claude author round {n} [{label}]')
+        f'chore(agentq): {uid} claude author round {n} [{label}]', '--', *changed)   # --only: только перечисленные пути, а не весь индекс
     u['author_applied'] = n
     task.save()
     say(f'Автор Claude {prof["model"]}/{prof["effort"]} [{prof["source"]}], раунд {n}: коммит {git(root, "rev-parse", "HEAD")[:10]}, файлов {len(changed)}. '

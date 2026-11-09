@@ -103,6 +103,10 @@ else:   # автор: правки файлов в рабочем каталог
         Path(p_).write_text(c_, encoding='utf-8', newline='')
     for p_ in sc.get('rm') or []:
         Path(p_).unlink()
+    for p_, c_ in (sc.get('stage') or {}).items():   # чужая правка, подготовленная (staged) во время работы автора
+        Path(p_).parent.mkdir(parents=True, exist_ok=True)
+        Path(p_).write_text(c_, encoding='utf-8', newline='')
+        __import__('subprocess').run(['git', 'add', p_], check=True)
     out = {'is_error': False, 'subtype': sc.get('subtype', 'success'), 'result': sc.get('text', 'готово')}
 mname = json.loads((d / 'claude_model.json').read_text()) if (d / 'claude_model.json').exists() else 'claude-%s-5-5' % a[a.index('--model') + 1]
 out['modelUsage'] = {m_: {'inputTokens': 11, 'outputTokens': 22, 'cacheReadInputTokens': 0, 'cacheCreationInputTokens': 33}
@@ -3089,6 +3093,33 @@ def t_claude_author():
     o1.cr('author-claude', 'be', '--task-file', note(o1), '--complexity', 'mechanical')
     check('mechanical: на новом CLI автор идёт на haiku/low, на CLI 2.1.286 (haiku — прежнее поколение) — ближайшая ступень выше sonnet/low',
           ca(n1) and 'model=haiku ' in ca(n1)[0] and 'effort=low' in ca(n1)[0] and ca(o1) and 'model=sonnet ' in ca(o1)[0] and 'effort=low' in ca(o1)[0], (ca(n1), ca(o1)))
+
+    # индекс: чужие подготовленные (staged) изменения не попадают в коммит автора
+    g = mixed_proj('ca-stg')
+    g.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    (g.repo / 'package.json').write_text('{"staged": true}', encoding='utf-8')
+    g.git('add', 'package.json')
+    h0 = head(g)
+    rc, _, err = g.cr('author-claude', 'be', '--task-file', note(g))
+    check('чужое staged-изменение до запуска: отказ ДО вызова Claude, коммита нет, индекс не тронут',
+          rc == 2 and 'staged' in err and not ca(g) and head(g) == h0 and g.git('diff', '--cached', '--name-only') == 'package.json', err)
+    g2 = mixed_proj('ca-stg2')
+    g2.script('claude', [{'edit': {'backend/app.py': APP_C}, 'stage': {'package.json': '{"during": true}'}}])
+    h0 = head(g2)
+    rc, _, err = g2.cr('author-claude', 'be', '--task-file', note(g2))
+    rc2, _, err2 = g2.cr('author-claude', 'be', '--task-file', note(g2))
+    check('staged-изменение появилось во время работы автора: коммита нет, чужая правка в коммит не попала, повтор не вызывает Claude заново',
+          rc == 2 and rc2 == 2 and ('вне списка' in err or 'staged' in err) and ('вне списка' in err2 or 'staged' in err2) and head(g2) == h0 and len(ca(g2)) == 1
+          and g2.git('diff', '--cached', '--name-only') == 'package.json' and (g2.repo / 'backend/app.py').read_text(encoding='utf-8') == APP_C, err + err2)
+    # восстановление после обрыва, когда за коммитом автора уже есть чужой коммит
+    lt = mixed_proj('ca-later')
+    lt.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    lt.cr('author-claude', 'be', '--task-file', note(lt))
+    lt.commit('package.json', '{"other": 1}', 'чужой коммит после автора')
+    state_edit(lt, lambda s_: s_['units']['be'].update(author_applied=0))
+    rc, out, err = lt.cr('author-claude', 'be', '--task-file', note(lt))
+    check('восстановление: коммит раунда найден по метке в истории, хотя после него есть чужой коммит — без нового вызова Claude',
+          rc == 0 and len(ca(lt)) == 1 and 'вызов не повторялся' in out and rstate(lt)['units']['be']['author_applied'] == 1, out + err)
 
 
 def main():
