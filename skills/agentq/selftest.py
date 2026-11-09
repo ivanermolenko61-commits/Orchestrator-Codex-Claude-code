@@ -2984,6 +2984,10 @@ def t_model_routing():
     check('эскалация после UNCERTAIN: sonnet/medium → sonnet/high, основание названо', rc == 1 and rc2 == 0 and 'sonnet/medium → sonnet/high' in out and 'UNCERTAIN' in out, out + err)
     check('эскалация не меняет бюджет, записи вызовов и расход цепочки',
           chain(x) == before == 2 and rstate(x)['budget'] == budget0 and sorted(rstate(x)['calls']) == calls0, (before, chain(x), budget0, rstate(x)['budget']))
+    rc_dup, _, err_dup = x.cr('escalate', 'fe', 'review', '--cause', 'quality', 'то же свидетельство второй раз подряд, нового вызова Claude не было')
+    check('одно свидетельство не даёт две эскалации: повтор без нового вызова Claude отклонён, журнал не изменён',
+          rc_dup == 2 and 'уже использовано' in err_dup and len(rstate(x)['units']['fe']['route']['esc']) == 1
+          and rstate(x)['units']['fe']['route']['floor'].get('review') == ['sonnet', 'high'], err_dup)
     rc, _, err = x.cr('escalate', 'fe', 'author', '--cause', 'quality', 'у frontend-автора Claude не участвует, это Codex')
     check('эскалация роли, где Claude не участвует, отклонена', rc == 2 and 'не участвует' in err, err)
     x.cr('author', 'fe')
@@ -3089,6 +3093,31 @@ def t_claude_author():
         rc, _, err = k_.cr('author-claude', 'be', '--task-file', note(k_))
         check(f'в результате автора {why}: отказ, коммита нет, рабочее дерево репозитория не тронуто',
               rc == 2 and why in err and head(k_) == h0 and not k_.git('status', '--porcelain') and (k_.repo / 'backend/app.py').read_text(encoding='utf-8') != content, err)
+    # коммит раунда изменён уже после автора (git commit --amend сохраняет автора и метку): восстановление по метке его не принимает
+    am = mixed_proj('ca-amend')
+    am.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    am.cr('author-claude', 'be', '--task-file', note(am))
+    (am.repo / 'backend/app.py').write_text(APP_C + '# чужая правка' + chr(10), encoding='utf-8')
+    am.git('commit', '-a', '--amend', '--no-edit')
+    amended = head(am)
+    state_edit(am, lambda s_: s_['units']['be'].update(author_applied=0))
+    rc, _, err = am.cr('author-claude', 'be', '--task-file', note(am))
+    check('коммит раунда изменён после автора (amend): восстановление отказано по хешам результата, раунд не закрыт, Claude заново не вызывался',
+          rc == 2 and 'хеши результата' in err and head(am) == amended and len(ca(am)) == 1 and rstate(am)['units']['be']['author_applied'] == 0
+          and 'agent-claude' in am.git('log', '-1', '--format=%an'), err)
+    # коммит раунда расширен другим файлом единицы уже после автора: набор файлов не совпадает с результатом
+    a2 = mixed_proj('ca-amend2')
+    a2.cr('unit', 'bm', '--kind', 'backend', '--files', 'backend/m1.py', 'backend/m2.py')
+    a2.script('claude', [{'edit': {'backend/m1.py': 'A = 1' + chr(10)}}])
+    a2.cr('author-claude', 'bm', '--task-file', note(a2))
+    (a2.repo / 'backend/m2.py').write_text('B = 2' + chr(10), encoding='utf-8')
+    a2.git('add', 'backend/m2.py')
+    a2.git('commit', '--amend', '--no-edit')
+    am2 = head(a2)
+    state_edit(a2, lambda s_: s_['units']['bm'].update(author_applied=0))
+    rc, _, err = a2.cr('author-claude', 'bm', '--task-file', note(a2))
+    check('коммит раунда расширен вторым файлом единицы после автора: набор файлов расходится с результатом, восстановление отказано',
+          rc == 2 and 'не тот набор файлов' in err and head(a2) == am2 and len(ca(a2)) == 1, err)
     # автор не может изменить файл контекста; сохранённая копия результата не подменяется
     c2 = mixed_proj('ca-ctxmod')
     c2.commit('backend/helper.py', 'HELPER_MARK = 1' + chr(10), 'helper')

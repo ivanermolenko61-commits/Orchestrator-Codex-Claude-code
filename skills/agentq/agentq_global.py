@@ -1831,7 +1831,7 @@ def parse_claude_author(expect):
     return go
 
 
-def round_commit(root, u, label):
+def round_commit(root, u, label, d):
     """Коммит раунда автора Claude по метке во всей истории единицы (после него могли появиться чужие коммиты). Принимается, только если его автор
     agent-claude и он затрагивает лишь файлы единицы; иное — остановка, а не молчаливое восстановление."""
     r = git(root, 'log', '--fixed-strings', f'--grep=[{label}]', '--format=%H', '-n', '1', f'{u["base"]}..HEAD', check=False)
@@ -1842,6 +1842,18 @@ def round_commit(root, u, label):
     own = {canon(f) for f in u['files']}
     need(git(root, 'log', '-1', '--format=%an', found) == 'agent-claude' and names and all(canon(x) in own for x in names),
          f'коммит {found[:10]} с меткой {label} затрагивает не только файлы единицы или сделан не автором agent-claude — восстановление отказано, решает тимлид')
+    # метка и автор не доказывают содержимое (git commit --amend сохраняет и то и другое): коммит должен совпасть с сохранённым результатом автора
+    need((d / 'base.json').is_file() and (d / 'result.json').is_file(),
+         f'нет записи результата автора для проверки коммита {found[:10]} — восстановление отказано, см. {d}')
+    base, recorded, res_dir = rjson(d / 'base.json'), rjson(d / 'result.json'), d / 'result'
+    expected = {f for f in u['files'] if f in recorded and recorded[f] != base['unit'].get(f)}
+    need(set(names) == expected, f'коммит {found[:10]} затрагивает не тот набор файлов, что сохранённый результат автора (хеши результата) — восстановление отказано')
+    for x in names:
+        want = (res_dir / x).read_bytes()
+        need(sha(want) == recorded[x], f'{x}: сохранённый результат автора изменён после записи (хеши результата) — восстановление отказано')
+        b = subprocess.run(['git', '-C', str(root), 'cat-file', 'blob', f'{found}:{x}'], capture_output=True, timeout=120, env=clean_env())
+        need(b.returncode == 0 and b.stdout in (want, want.replace(b'\r\n', b'\n')),
+             f'{x}: содержимое коммита {found[:10]} не совпадает с сохранённым результатом автора (хеши результата; коммит изменён после раунда?) — восстановление отказано, решает тимлид')
     return found
 
 
@@ -1866,7 +1878,7 @@ def do_claude_author(task, uid, opts, note):
     label = f'aq:{task.s["id"]}/{uid}/a{n}'
     known = task.s['calls'].get(key)
     seed, ctx = {}, []   # содержимое временной копии и контекст нового запроса; при восстановлении (вызов уже сделан) запрос не строится
-    done_sha = round_commit(root, u, label) if known else None   # коммит сделан, состояние не сохранено (обрыв): дописываем без нового вызова
+    done_sha = round_commit(root, u, label, d) if known else None   # коммит сделан, состояние не сохранено (обрыв): дописываем без нового вызова
     if done_sha:
         u['author_applied'] = n
         task.save()
@@ -3070,18 +3082,23 @@ def cmd_escalate(a):
          'автор исправляет замечания на прежнем профиле')
     done = sum(1 for e in u['route']['esc'] if e.get('role') == a.role)
     need(done < MAX_ESCALATIONS, f'уже {done} эскалации роли {a.role} в этой единице (предел {MAX_ESCALATIONS}): решает Иван — сузить требования или принять остаток')
+    calls = [(k, c) for k, c in t.s['calls'].items() if c['unit'] == a.uid and c['role'] == a.role and c.get('kind') in CLAUDE_KINDS and c.get('profile')]
+    last_kc = max(calls, key=lambda kc: kc[1]['n'], default=None)   # вызов, на котором основано свидетельство (его профиль мог быть задан вручную выше политики)
+    last = last_kc[1] if last_kc else None
+    basis = f'{last_kc[0] if last_kc else "-"}|кругов={len(u["rounds"])}|вердикт={(str(v["n"]) + ":" + v["sha"][:10]) if v else "-"}'
+    used = [e.get('basis') for e in u['route']['esc'] if e.get('role') == a.role]
+    need(basis not in used, f'это основание ({basis}) уже использовано для эскалации: следующая допустима только после нового вызова Claude на повышенном профиле '
+         'и нового подтверждённого сбоя качества (одно свидетельство не повышает профиль дважды)')
     names = list(u['files']) or ([] if not u['base'] else git(t.root, 'diff', '--no-ext-diff', '--name-only', f'{u["base"]}..HEAD').splitlines())
     cur = choose_profile(t, a.uid, a.role, names)
     base = (cur['model'], cur['effort'])
-    last = max((c for c in t.s['calls'].values() if c['unit'] == a.uid and c['role'] == a.role and c.get('kind') in CLAUDE_KINDS and c.get('profile')),
-               key=lambda c: c['n'], default=None)   # профиль вызова, доказавшего нехватку качества (он мог быть задан вручную выше политики)
     if last and step_key((last['profile']['model'], last['profile']['effort'])) > step_key(base):
         base = (last['profile']['model'], last['profile']['effort'])
     nxt = next_step(base)
     need(nxt, f'выше {base[0]}/{base[1]} ступеней нет: решает Иван (сузить требования или принять остаток)')
     u['route']['floor'][a.role] = list(nxt)
     u['route']['esc'].append({'at': time.time(), 'event': 'escalated', 'role': a.role, 'from': f'{base[0]}/{base[1]}', 'to': f'{nxt[0]}/{nxt[1]}',
-                              'evidence': ev, 'note': note})
+                              'evidence': ev, 'note': note, 'basis': basis})
     t.save()
     say(f'Эскалация {a.role} {a.uid}: {base[0]}/{base[1]} → {nxt[0]}/{nxt[1]}. Основание: {"; ".join(ev)}. Бюджет вызовов и история не изменены.')
     return 0
