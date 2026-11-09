@@ -89,13 +89,24 @@ while True:
 with (d / 'calls.log').open('a') as f:
     leak = [k for k in ('CLAUDE_CODE_EFFORT_LEVEL', 'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
                         'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL', 'ANTHROPIC_API_KEY') if k in os.environ]
-    f.write('claude-review model=' + a[a.index('--model') + 1] + ' tools=' + repr(a[a.index('--tools') + 1]) + ' nosession=' + str('--no-session-persistence' in a) +
-            ' effort=' + a[a.index('--effort') + 1] + ' leak=' + ','.join(leak) + ' fallback=' + str('--fallback-model' in a) + '\n')
+    kind = 'claude-review' if '--json-schema' in a else 'claude-author'
+    f.write(kind + ' model=' + a[a.index('--model') + 1] + ' tools=' + repr(a[a.index('--tools') + 1]) + ' nosession=' + str('--no-session-persistence' in a) +
+            ' effort=' + a[a.index('--effort') + 1] + ' leak=' + ','.join(leak) + ' fallback=' + str('--fallback-model' in a) +
+            ' mode=' + (a[a.index('--permission-mode') + 1] if '--permission-mode' in a else '-') + '\n')
 (d / f'claude-prompt-{n}.txt').write_text(prompt, encoding='utf-8')
 sc = json.loads((d / 'claude.json').read_text())[n]
-out = {'is_error': False, 'subtype': 'success', 'structured_output': sc}
+if '--json-schema' in a:
+    out = {'is_error': False, 'subtype': 'success', 'structured_output': sc}
+else:   # автор: правки файлов в рабочем каталоге (cwd = корень репозитория)
+    for p_, c_ in (sc.get('edit') or {}).items():
+        Path(p_).parent.mkdir(parents=True, exist_ok=True)
+        Path(p_).write_text(c_, encoding='utf-8', newline='')
+    for p_ in sc.get('rm') or []:
+        Path(p_).unlink()
+    out = {'is_error': False, 'subtype': sc.get('subtype', 'success'), 'result': sc.get('text', 'готово')}
 mname = json.loads((d / 'claude_model.json').read_text()) if (d / 'claude_model.json').exists() else 'claude-%s-5-5' % a[a.index('--model') + 1]
-out['modelUsage'] = {mname: {'inputTokens': 11, 'outputTokens': 22, 'cacheReadInputTokens': 0, 'cacheCreationInputTokens': 33}}
+out['modelUsage'] = {m_: {'inputTokens': 11, 'outputTokens': 22, 'cacheReadInputTokens': 0, 'cacheCreationInputTokens': 33}
+                     for m_ in (mname if isinstance(mname, list) else [mname])}
 out['total_cost_usd'] = 0.0123
 if (d / 'claude_usage.json').exists():
     out['usage'] = json.loads((d / 'claude_usage.json').read_text())
@@ -2832,15 +2843,17 @@ def t_model_routing():
     rc, _, err = p.cr('profile', 'fe', 'review', '--complexity', 'huge')
     check('неизвестный класс отклонён', rc == 2, err)
     rc, _, err = p.cr('profile', 'fe', 'review', '--model', 'haiku')
-    check('ручной выбор Haiku как reviewer без причины отклонён', rc == 2 and 'Haiku' in err, err)
-    rc, out, _ = p.cr('profile', 'fe', 'review', '--model', 'haiku', '--reason', 'явное решение владельца для проверки текста')
-    check('ручной выбор Haiku как reviewer с причиной принят и помечен override', rc == 0 and 'haiku/' in out and 'override' in out, out)
+    rc2, _, err2 = p.cr('profile', 'fe', 'review', '--model', 'haiku', '--reason', 'явное решение владельца, причина достаточной длины')
+    check('Haiku как независимый reviewer отклонён всегда: и без причины, и с причиной (финальная приёмка логики)',
+          rc == 2 and rc2 == 2 and 'Haiku не может быть' in err and 'Haiku не может быть' in err2, err + err2)
+    rc, out, _ = p.cr('profile', 'be', 'author', '--model', 'haiku', '--complexity', 'mechanical')
+    check('Haiku как автор допустим вручную (override), как и по политике для mechanical', rc == 0 and 'haiku/' in out and 'override' in out, out)
     rc, _, err = p.cr('profile', 'fe', 'review', '--model', 'sonnet', '--reason', 'токен ghp_' + 'a' * 24 + ' в причине недопустим')
     check('причина ручного выбора с похожим на секрет отклонена', rc == 2 and 'секрет' in err, err)
     out = p.cr('profile', 'be', 'author', '--complexity', 'standard', '--applied', 'claude-sonnet-5-5 (по /model)')[1]
     st = p.cr('status')[1]
     check('автор: применение подтверждено только как «сообщено тимлидом»; основной чат движок не переключает',
-          'Основной чат тимлида движок не переключает' in out and 'сообщено тимлидом — claude-sonnet-5-5' in st and 'не подтверждено' in st, out + st)
+          'движок сам не переключает' in out and 'author-claude be --task-file' in out and 'сообщено тимлидом — claude-sonnet-5-5' in st and 'не подтверждено' in st, out + st)
 
     # --- реальные argv, окружение и фактическая модель
     q = mixed_proj('rt-argv')
@@ -2907,6 +2920,24 @@ def t_model_routing():
     check('после отказа повторный запуск не вызывает Claude заново (читает сохранённый ответ), профиль из записи резерва, вердикт не выдан',
           rc == 2 and 'MODEL:' in err and len(cl(m)) == 1 and rstate(m)['units']['fe']['verdict'] is None, err)
 
+    for label, mj, why in (('rt-gen', '"claude-sonnet-4-5-20251001"', 'прежнее поколение той же семьи'),
+                           ('rt-fam', '"claude-haiku-5-5"', 'другая семья'),
+                           ('rt-mix', '["claude-sonnet-5-5", "claude-haiku-5-5"]', 'смешанный modelUsage (одно совпадение недостаточно)')):
+        z = mixed_proj(label)
+        z.script('codex', [{'files': FILES_OK1}])
+        z.script('claude', [OK])
+        (z.fake / 'claude_model.json').write_text(mj)
+        z.cr('author', 'fe')
+        rc, _, err = z.cr('review', 'fe')
+        check(f'сверка модели: {why} — ответ не принят, PASS нет', rc == 2 and 'MODEL:' in err and rstate(z)['units']['fe']['verdict'] is None, err)
+    ok_ = mixed_proj('rt-date')
+    ok_.script('codex', [{'files': FILES_OK1}])
+    ok_.script('claude', [OK])
+    (ok_.fake / 'claude_model.json').write_text('"claude-sonnet-5-5-20261001"')
+    ok_.cr('author', 'fe')
+    rc, _, err = ok_.cr('review', 'fe')
+    check('сверка модели: идентификатор с датой того же семейства и поколения принимается', rc == 0, err)
+
     # --- прежние записи без профиля
     g = mixed_proj('rt-legacy')
     g.script('codex', [{'files': FILES_OK1}])
@@ -2958,15 +2989,15 @@ def t_model_routing():
     state_edit(x, lambda s_: s_['units']['fe']['verdict'].update(value='UNCERTAIN'))
     rc, _, err = x.cr('escalate', 'fe', 'review', '--cause', 'quality', 'ещё одна ступень по подтверждённой нехватке качества')
     check('вторая эскалация допустима (предел 2 на роль и единицу)', rc == 0, err)
-    state_edit(x, lambda s_: s_['units']['fe']['verdict'].update(value='UNCERTAIN'))
+    flood = [{'event': 'profile', 'role': 'author', 'model': 'sonnet', 'effort': 'medium', 'source': 'policy', 'reason': 'x', 'at': 0}] * 60
+    state_edit(x, lambda s_: (s_['units']['fe']['verdict'].update(value='UNCERTAIN'), s_['units']['fe']['route'].update(log=flood)))   # журнал профилей «прокручен»
     rc, _, err = x.cr('escalate', 'fe', 'review', '--cause', 'quality', 'третья ступень по подтверждённой нехватке качества')
-    check('третья эскалация отклонена: решает Иван', rc == 2 and 'предел' in err, err)
+    check('третья эскалация отклонена: решает Иван; лимит не зависит от усечения журнала профилей', rc == 2 and 'предел' in err, err)
 
     # --- журнал и продолжение
     rc, _, _ = x.cr('finish', '--abandon')
     led = rledger(x)[-1]['unit_meta']['fe']['route']
-    check('журнал: эскалации и нижняя граница профиля сохранены в записи задачи', rc == 1 and led['floor'].get('review') and len(
-        [e for e in led['log'] if e.get('event') == 'escalated']) == 2, led)
+    check('журнал: эскалации и нижняя граница профиля сохранены в записи задачи', rc == 1 and led['floor'].get('review') and len(led['esc']) == 2, led)
     rc, _, err = x.cr('start', 'rt-esc продолжение', '--id', 'rt-esc-2', '--kind', 'mixed', '--contract-file', x.contract(), '--continues', 'rt-esc')
     x.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
     rc2, out, err2 = x.cr('profile', 'fe', 'review')
@@ -2974,11 +3005,97 @@ def t_model_routing():
           rc == 0 and rc2 == 0 and 'escalation' in out and ('opus' in out or 'sonnet/high' in out), out + err + err2)
 
 
+def t_claude_author():
+    """Автор Claude (1.4.0): реальный запуск claude -p с профилем политики, проверка файлов до коммита, восстановление без повторного вызова."""
+    def ca(p):
+        return [c for c in p.calls() if c.startswith('claude-author')]
+
+    def note(p):
+        f = p.root / 'note.txt'
+        f.write_text('добавь в backend/app.py комментарий к функции add', encoding='utf-8')
+        return f
+
+    def head(p):
+        return p.git('rev-parse', 'HEAD')
+
+    APP_C = 'def add(a, b):\n    return a + b  # claude\n'
+    p = mixed_proj('ca-ok')
+    p.script('claude', [{'edit': {'backend/app.py': APP_C}, 'text': 'готово: комментарий добавлен'}])
+    rc, out, err = p.cr('author-claude', 'be', '--task-file', note(p), env={'CLAUDE_CODE_EFFORT_LEVEL': 'low', 'ANTHROPIC_MODEL': 'haiku'})
+    check('автор Claude: реальный запуск claude -p с профилем sonnet/medium, инструменты без Bash, режим dontAsk, окружение очищено',
+          rc == 0 and len(ca(p)) == 1 and 'model=sonnet ' in ca(p)[0] and 'effort=medium' in ca(p)[0] and "tools='Read,Edit,Write,Grep,Glob'" in ca(p)[0]
+          and 'mode=dontAsk' in ca(p)[0] and 'leak= ' in ca(p)[0] + ' ' and 'nosession=True' in ca(p)[0], out + err + str(p.calls()))
+    check('автор Claude: коммит только файла единицы с меткой раунда, автор коммита agent-claude',
+          'aq:ca-ok/be/a1' in p.git('log', '-1', '--format=%s') and 'agent-claude' in p.git('log', '-1', '--format=%an')
+          and (p.repo / 'backend/app.py').read_text(encoding='utf-8') == APP_C and not p.git('status', '--porcelain'), p.git('log', '-1', '--format=%s'))
+    st = p.cr('status')[1]
+    check('автор Claude: status показывает запрошенный профиль, фактическую модель и расход автора 1/3',
+          'запрошен sonnet/medium' in st and 'claude-sonnet-5-5' in st and 'автор 1/3' in st, st)
+    p.script('codex', [{'text': 'VERDICT: PASS'}])
+    rc, _, _ = p.cr('review', 'be')
+    check('после автора Claude независимое ревью Codex идёт обычным путём (PASS)', rc == 0 and p.count('codex-review') == 1)
+    # обрыв после коммита, до сохранения состояния: повторный запуск дописывает состояние без нового вызова
+    q = mixed_proj('ca-crash')
+    q.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    q.cr('author-claude', 'be', '--task-file', note(q))
+    state_edit(q, lambda s_: s_['units']['be'].update(author_applied=0))
+    rc, out, err = q.cr('author-claude', 'be', '--task-file', note(q))
+    check('восстановление: коммит уже есть, состояние не сохранено — дописано без нового вызова Claude', rc == 0 and len(ca(q)) == 1 and 'вызов не повторялся' in out, out + err)
+    # изменение вне списка файлов
+    o = mixed_proj('ca-out')
+    h0 = head(o)
+    o.script('claude', [{'edit': {'backend/app.py': APP_C, 'backend/other.py': 'x = 1\n'}}])
+    rc, _, err = o.cr('author-claude', 'be', '--task-file', note(o))
+    rc2, _, err2 = o.cr('author-claude', 'be', '--task-file', note(o))
+    check('автор изменил файл вне списка: отказ, коммита нет, правки оставлены для разбора, повтор не вызывает Claude заново',
+          rc == 2 and rc2 == 2 and 'вне списка' in err and 'вне списка' in err2 and head(o) == h0 and len(ca(o)) == 1
+          and (o.repo / 'backend/other.py').exists(), err + err2)
+    e_ = mixed_proj('ca-empty')
+    e_.script('claude', [{'edit': {}}])
+    rc, _, err = e_.cr('author-claude', 'be', '--task-file', note(e_))
+    check('пустая правка автора Claude отклонена', rc == 2 and 'пустая правка' in err and head(e_) == e_.git('rev-parse', 'HEAD'), err)
+    d_ = mixed_proj('ca-del')
+    d_.script('claude', [{'rm': ['backend/app.py']}])
+    rc, _, err = d_.cr('author-claude', 'be', '--task-file', note(d_))
+    check('удаление файла автором Claude отклонено', rc == 2 and 'удаление' in err, err)
+    # границы ролей и состояния до вызова
+    r = mixed_proj('ca-refuse')
+    r.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    n_ = note(r)
+    rc_fe, _, err_fe = r.cr('author-claude', 'fe', '--task-file', n_)
+    rc_pr, _, err_pr = r.cr('author-claude', 'pr', '--task-file', n_)
+    r.cr('unit', 'bp', '--kind', 'backend', '--files', 'Dockerfile')
+    rc_bp, _, err_bp = r.cr('author-claude', 'bp', '--task-file', n_)
+    (r.repo / 'backend/app.py').write_text('def add(a, b):\n    return 0\n', encoding='utf-8')
+    rc_dirty, _, err_dirty = r.cr('author-claude', 'be', '--task-file', n_)
+    check('автор Claude: frontend, protected, защищённый файл и грязные файлы единицы отклонены ДО вызова Claude',
+          rc_fe == rc_pr == rc_bp == rc_dirty == 2 and 'только для backend' in err_fe and 'только для backend' in err_pr and 'защищённая зона' in err_bp
+          and 'изменены вне агента' in err_dirty and not ca(r), err_fe + err_pr + err_bp + err_dirty)
+    # подмена модели и версия CLI
+    m = mixed_proj('ca-mm')
+    m.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    (m.fake / 'claude_model.json').write_text('"claude-opus-5-5"')
+    h0 = head(m)
+    rc, _, err = m.cr('author-claude', 'be', '--task-file', note(m))
+    rc2, _, err2 = m.cr('author-claude', 'be', '--task-file', note(m))
+    check('автор Claude: модель в ответе не совпала — правки не приняты (коммита нет), повтор не вызывает Claude заново',
+          rc == 2 and rc2 == 2 and 'MODEL:' in err and 'MODEL:' in err2 and head(m) == h0 and len(ca(m)) == 1, err + err2)
+    n1 = mixed_proj('ca-new')
+    n1.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    n1.cr('author-claude', 'be', '--task-file', note(n1), '--complexity', 'mechanical')
+    o1 = mixed_proj('ca-old')
+    (o1.fake / 'claude_version.txt').write_text('2.1.286 (Claude Code)')
+    o1.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    o1.cr('author-claude', 'be', '--task-file', note(o1), '--complexity', 'mechanical')
+    check('mechanical: на новом CLI автор идёт на haiku/low, на CLI 2.1.286 (haiku — прежнее поколение) — ближайшая ступень выше sonnet/low',
+          ca(n1) and 'model=haiku ' in ca(n1)[0] and 'effort=low' in ca(n1)[0] and ca(o1) and 'model=sonnet ' in ca(o1)[0] and 'effort=low' in ca(o1)[0], (ca(n1), ca(o1)))
+
+
 def main():
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding='utf-8', errors='replace')
     for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_task_budget_scope, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links, t_parallel,
-              t_unavailable_and_modes, t_findings, t_context, t_timing, t_acceptance_regressions, t_model_routing):
+              t_unavailable_and_modes, t_findings, t_context, t_timing, t_acceptance_regressions, t_model_routing, t_claude_author):
         try:
             t()
         except Exception as e:  # noqa: BLE001
