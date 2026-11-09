@@ -1550,6 +1550,7 @@ def choose_profile(task, uid, role, names, opts=None):
              f'ручной профиль {step[0]}/{step[1]} недоступен: Claude CLI {".".join(map(str, version))} старше {".".join(map(str, MIN_CLI[step[0]]))} '
              f'(алиас {step[0]} указывает на прежнее поколение). Подмены нет — выбери другой профиль или обнови CLI')
         reason = (opts.get('reason') or '').strip()
+        need(not SECRET_RE.search(reason), 'в причине найдено похожее на секрет')
         if role == 'review' and step[0] == 'haiku':
             need(len(reason) >= 20, 'Haiku как независимый reviewer — только по явному решению: --reason «…» (≥ 20 символов); это не финальная приёмка логики')
         why = [f'ручной параметр {step[0]}/{step[1]}' + (f': {reason}' if reason else '')]
@@ -2560,12 +2561,11 @@ def do_review(task, uid, effort, full, opts=None):
         build = lambda: (lambda b: (b[0], {**(b[1] or {}), 'profile': prof}))(base_build())
         res = model_call(task, uid, 'review', n, 'claude-review', build, launch_claude_review(prof) if prof else None,
                          lambda text: parse_claude_review(text, prof['model'] if prof else None), subject=subject, legacy_ok=legacy_ok)
-        who = f'Claude {prof["model"]}/{prof["effort"]} ({prof["source"]}; свежий контекст)' if prof else 'Claude (профиль прежней версии, не записан)'
-        effort = prof['effort'] if prof else 'не записан'
+        who = f'Claude {prof["model"]}/{prof["effort"]} [{prof["source"]}; свежий контекст]' if prof else 'Claude (профиль прежней версии, не записан)'
     else:
         effort = opts.get('effort') or effort or 'medium'
         res = model_call(task, uid, 'review', n, 'codex-review', build, launch_codex_review(effort), parse_codex_review, subject=subject, legacy_ok=legacy_ok)
-        who = f'Codex {MODEL}'
+        who = f'Codex {MODEL}/{effort}'
     value, report = res['verdict'], res['report']
     structured = (res.get('structured') or {}).get('findings') or []
     if value == 'PASS' and (re.search(r'^(?:[^\w\[\n]|\d+[.)])*\[(BLOCKER|MAJOR)\]', report, re.M | re.I)
@@ -2607,7 +2607,7 @@ def do_review(task, uid, effort, full, opts=None):
     u['open_review'] = value != 'PASS'
     task.save()
     static = '' if u['checks'].get('configured') else '\n(механические проверки не применялись: обоснование тимлида зафиксировано)'
-    say(f'Ревью {who}/{effort} раунд {n} (контрольная точка {DEFAULTS["review"]}) на {tip[:10]}:\n{report}\nVERDICT: {value}{static}{note}{engine_note}')
+    say(f'Ревью {who} раунд {n} (контрольная точка {DEFAULTS["review"]}) на {tip[:10]}:\n{report}\nVERDICT: {value}{static}{note}{engine_note}')
     return 0 if value == 'PASS' else 1
 
 
@@ -2811,7 +2811,8 @@ def cmd_profile(a):
     if a.applied:
         need(not SECRET_RE.search(a.applied), 'в тексте найдено похожее на секрет')
         ev['applied_reported'] = a.applied[:200]
-    route_event(t, a.uid, **ev)
+    if a.role == 'author':   # применение профиля reviewer видно по вызову (запись резерва и modelUsage), отдельная запись не нужна
+        route_event(t, a.uid, **ev)
     t.save()
     say(f'ПРОФИЛЬ {a.role} {a.uid}: {prof["model"]}/{prof["effort"]} — {prof["source"]}; {prof["reason"]} (Claude CLI {prof["cli"]}).')
     if a.role == 'author':

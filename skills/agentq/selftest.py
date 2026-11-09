@@ -2835,6 +2835,8 @@ def t_model_routing():
     check('ручной выбор Haiku как reviewer без причины отклонён', rc == 2 and 'Haiku' in err, err)
     rc, out, _ = p.cr('profile', 'fe', 'review', '--model', 'haiku', '--reason', 'явное решение владельца для проверки текста')
     check('ручной выбор Haiku как reviewer с причиной принят и помечен override', rc == 0 and 'haiku/' in out and 'override' in out, out)
+    rc, _, err = p.cr('profile', 'fe', 'review', '--model', 'sonnet', '--reason', 'токен ghp_' + 'a' * 24 + ' в причине недопустим')
+    check('причина ручного выбора с похожим на секрет отклонена', rc == 2 and 'секрет' in err, err)
     out = p.cr('profile', 'be', 'author', '--complexity', 'standard', '--applied', 'claude-sonnet-5-5 (по /model)')[1]
     st = p.cr('status')[1]
     check('автор: применение подтверждено только как «сообщено тимлидом»; основной чат движок не переключает',
