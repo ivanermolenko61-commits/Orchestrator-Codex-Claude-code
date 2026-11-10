@@ -11,12 +11,14 @@
   start "<цель>" [--id ID] [--kind backend|frontend|mixed] [--contract-file F] [--plan-approved]
   unit <uid> --kind backend|frontend|protected --files F... [--context F...] [--after U...]
   author <uid> [low|medium|high] [--wait СЕК]   один вызов Codex-автора (frontend-единица); --wait: ждать готовности --after без расхода
-  cycle <uid> [low|medium|high] [--wait СЕК]    frontend: автор -> проверки -> ревью -> исправления до PASS/лимита
+  cycle <uid> [low|medium|high] [--wait СЕК] [--task-file F]   автор -> проверки -> ревью -> исправления до PASS/лимита
+                                (frontend — автор Codex; backend — автор Claude по заданию F с профилем по политике)
   review [uid] [low|medium|high] [--full]   независимое ревью другим сервисом
   profile <uid> author|review   предпросмотр профиля Claude (модель/effort) по политике, без вызова модели (журнал не меняет; --applied — сообщённое применение)
-  author-claude <uid> --task-file F   автор Claude (backend-единица со списком файлов): реальный запуск claude -p с профилем по политике, коммит только файлов единицы
+  author-claude <uid> --task-file F   автор Claude (backend-единица со списком файлов): claude -p с профилем по политике; кандидат — в своей
+                                рабочей копии агента (ветка agent/claude/…), дерево и индекс пользователя не трогаются
                                 (review/cycle принимают --complexity --risk --model --reason: признаки и ручной выбор профиля Claude)
-  integrate <uid>               кандидат frontend-единицы в ветку задачи после PASS и успешных проверок: ff-only, а если ветка ушла вперёд
+  integrate <uid>               кандидат единицы (frontend или backend автора Claude) в ветку задачи после PASS и успешных проверок: ff-only, а если ветка ушла вперёд
                                 без файлов единицы — слияние без конфликтов, проверки на итоговом SHA до перемещения ветки
   checks [uid]                  механические проверки точного SHA в контейнере (без вызова модели)
   waive <uid> "<причина>"       обоснование неприменимости проверок (только если их нет в конфигурации базы)
@@ -1844,13 +1846,15 @@ def parse_claude_author(expect):
     return go
 
 
-def round_commit(root, u, label, d):
-    """Коммит раунда автора Claude по метке во всей истории единицы (после него могли появиться чужие коммиты). Принимается, только если его автор
-    agent-claude и он затрагивает лишь файлы единицы; иное — остановка, а не молчаливое восстановление."""
-    r = git(root, 'log', '--fixed-strings', f'--grep=[{label}]', '--format=%H', '-n', '1', f'{u["base"]}..HEAD', check=False)
+def round_commit(root, u, label, d, expected):
+    """Коммит раунда автора Claude в рабочей копии агента (root — worktree единицы): прямой потомок кандидата прошлого раунда (или базы) с меткой
+    раунда. Принимается, только если его автор agent-claude, он затрагивает лишь файлы единицы и совпадает с сохранённым результатом; иное —
+    остановка, а не молчаливое восстановление."""
+    r = git(root, 'log', '--fixed-strings', f'--grep=[{label}]', '--format=%H', '-n', '1', f'{expected}..HEAD', check=False)
     found = r.stdout.strip() if r.returncode == 0 else ''
     if not found:
         return None
+    need(git(root, 'rev-parse', f'{found}^') == expected, f'коммит {found[:10]} с меткой {label} не является прямым продолжением кандидата — восстановление отказано')
     names = git(root, 'diff-tree', '--no-commit-id', '--name-only', '-r', found).splitlines()
     own = {canon(f) for f in u['files']}
     need(git(root, 'log', '-1', '--format=%an', found) == 'agent-claude' and names and all(canon(x) in own for x in names),
@@ -1870,17 +1874,27 @@ def round_commit(root, u, label, d):
     return found
 
 
-def staged_names(root):
-    return git(root, 'diff', '--cached', '--name-only').splitlines()
-
-
 def index_blob(root, x):
     """Байты файла из индекса (staged-версия) либо None, если в индексе его нет. Читается plumbing-командой, без фильтров рабочего дерева."""
     r = subprocess.run(['git', '-c', 'core.fsmonitor=false', '-C', str(root), 'cat-file', 'blob', f':{x}'], capture_output=True, timeout=120, env=clean_env())
     return r.stdout if r.returncode == 0 else None
 
 
+def lf(raw):
+    return raw.replace(b'\r\n', b'\n')
+
+
+def worktree_dirty(wt):
+    """Пути рабочей копии агента с любыми изменениями (индекс, рабочие файлы, неотслеживаемые)."""
+    r = subprocess.run(['git', '-c', 'core.fsmonitor=false', '-c', 'core.quotepath=false', '-C', str(wt), 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
+                       capture_output=True, timeout=120, env=clean_env())
+    need(r.returncode == 0, 'git status рабочей копии автора не удался: ' + r.stderr.decode('utf-8', 'replace')[:200])
+    return sorted({e[3:] for e in r.stdout.decode('utf-8', 'replace').split('\0') if len(e) > 3})
+
+
 def do_claude_author(task, uid, opts, note):
+    """Автор Claude пишет кандидата в СВОЕЙ рабочей копии (worktree агента и ветка agent/claude/…), как автор Codex: дерево и индекс
+    пользователя не читаются и не меняются. В ветку задачи кандидат попадает только через integrate после независимого PASS."""
     root, u = task.root, task.unit(uid)
     need(u['kind'] == 'backend' and u['files'], f'{uid}: автора Claude движок запускает только для backend-единицы со списком файлов (клиентский код пишет Codex, '
          'защищённые зоны — тимлид; без списка файлов границы правок не проверить)')
@@ -1889,44 +1903,55 @@ def do_claude_author(task, uid, opts, note):
     for f in u['files']:
         need(not is_protected(mod, rules, f), f'{f}: защищённая зона — файл остаётся у тимлида')
         need(not hidden_path(f), f'{f}: секретный/lock-путь модели не передаётся')
-        nolink(root, f, 'файл')
     need(git(root, 'branch', '--show-current') == task.s['branch'], 'ветка задачи изменилась')
     n = pending_n(task, uid, 'author', u['author_applied'])
     key = f'{uid}:author:{n}'
     d = task.dir / 'calls' / f'{uid}-author-{n}'
     label = f'aq:{task.s["id"]}/{uid}/a{n}'
     known = task.s['calls'].get(key)
+    if not (u['worktree'] and Path(u['worktree']).exists()):
+        need(not known, f'{key}: вызов уже сделан, а рабочей копии автора нет ({u["worktree"]}) — повтор запрещён, см. {d}')
+        head = git(root, 'rev-parse', 'HEAD')
+        if not u['branch'] and u['base'] != head:
+            # единица уже шла коммитами в ветке задачи: кандидат строится от текущего HEAD, ревью по-прежнему видит всё с исходной базы
+            u['review_base'] = u['review_base'] or u['base']
+            u['base'] = head
+            task.save()
+        claim(task, uid)
+    wt = Path(u['worktree'])
+    for f in u['files']:
+        nolink(wt, f, 'файл')
+    expected = u['candidate'] or u['base']
     if known:
         recover_author_workspace(d)   # обрыв после процесса, до сохранения результата: результат снимается с сохранённой копии, вызова нет
-    seed, ctx = {}, []   # содержимое временной копии и контекст нового запроса; при восстановлении (вызов уже сделан) запрос не строится
-    done_sha = round_commit(root, u, label, d) if known else None   # коммит сделан, состояние не сохранено (обрыв): дописываем без нового вызова
-    if done_sha:
-        u['author_applied'] = n
-        task.save()
-        say(f'Автор Claude, раунд {n}: коммит {done_sha[:10]} уже сделан, состояние дописано (вызов не повторялся).')
+    head_wt = git(wt, 'rev-parse', 'HEAD')
+    if head_wt != expected:   # коммит раунда сделан, состояние не сохранено (обрыв): дописываем без нового вызова
+        found = round_commit(wt, u, label, d, expected) if known else None
+        need(found and found == head_wt, 'в рабочей копии автора внешний коммит без сохранённого результата автора — работа остановлена, решает тимлид')
+        need(not worktree_dirty(wt), 'рабочая копия автора изменена вне агента')
+        accept_author(task, uid, {'unmet_requirements': []}, n, found)
+        say(f'Автор Claude, раунд {n}: кандидат {found[:10]} уже закоммичен, состояние дописано (вызов не повторялся).')
         return n
+    seed, ctx = {}, []   # содержимое временной копии и контекст нового запроса; при восстановлении (вызов уже сделан) запрос не строится
     if known:
         prof = known.get('profile')
         need(prof, f'{key}: в записи вызова нет профиля — повтор запрещён, см. {d}')
     else:
-        need(not git(root, 'status', '--porcelain', '--', *u['files']), 'файлы единицы изменены вне агента: закоммить или откати до запуска автора')
-        need(not staged_names(root), 'в индексе есть подготовленные (staged) изменения: ' + ', '.join(staged_names(root)[:5]) +
-             ' — коммит автора мог бы захватить чужую правку; закоммить или сними их (git restore --staged) до запуска автора')
+        need(not worktree_dirty(wt), 'рабочая копия автора изменена вне агента')
         prof = choose_profile(task, uid, 'author', u['files'], opts)
         base_unit = {}
-        base_disk = {f: file_hash(root, f) for f in u['files']}   # байты рабочей копии до вызова автора (git status чист): с HEAD они могут не совпадать (autocrlf)
-        for f in u['files']:   # файлы единицы берутся из коммита; с похожим на секрет — не передаются
-            if git(root, 'ls-tree', 'HEAD', '--', f, check=False).stdout.strip():
-                text, h = context_blob(root, 'HEAD', f)
+        for f in u['files']:   # файлы единицы — из коммита кандидата (или базы) рабочей копии агента; с похожим на секрет — не передаются
+            if git(wt, 'ls-tree', 'HEAD', '--', f, check=False).stdout.strip():
+                text, h = context_blob(wt, 'HEAD', f)
                 need(not SECRET_RE.search(text), f'{f}: в файле единицы уже есть похожее на секрет — автору не передаётся')
                 seed[f], base_unit[f] = text.encode('utf-8'), h
             else:
                 base_unit[f] = None   # новый файл
-        ctx = read_context(root, 'HEAD', u['context'], mod, rules)   # контекст — только проверенные файлы коммита (защита и секреты проверяются здесь)
+        ctx = read_context(wt, 'HEAD', u['context'], mod, rules)   # контекст — только проверенные файлы коммита (защита и секреты проверяются здесь)
         for e in ctx:
             seed[e['path']] = e['text'].encode('utf-8')
         d.mkdir(parents=True, exist_ok=True)
-        wjson(d / 'base.json', {'unit': base_unit, 'disk': base_disk, 'context': {e['path']: e['sha256'] for e in ctx}})   # до резерва вызова: сверка результата переживает обрыв
+        wjson(d / 'base.json', {'unit': base_unit, 'context': {e['path']: e['sha256'] for e in ctx}, 'expected': expected})   # до резерва вызова
     ensure_registry(task, uid)
 
     def build():
@@ -1943,20 +1968,22 @@ def do_claude_author(task, uid, opts, note):
         parts.append(RULES_BLOCK)
         if u['rethinks']:
             parts.append('Тимлид пересмотрел подход после кругов без прогресса: ' + u['rethinks'][-1]['note'])
-        if open_ids(u):
-            parts.append(findings_block(u) + '\n(исправь BLOCKER и MAJOR; не согласен — скажи в итоговом тексте, почему)')
+        fb = feedback_for(u) if u['candidate'] else carried_text(u)   # замечания ревью и красные проверки прошлого кандидата
+        if fb:
+            parts.append('=== ЗАМЕЧАНИЯ ПРЕДЫДУЩЕГО КРУГА (исправь BLOCKER и MAJOR и падающие проверки; не согласен — скажи в итоговом тексте, почему) ===\n' + fb)
         return '\n\n'.join(parts), {'profile': prof}
 
     res = model_call(task, uid, 'author', n, 'claude-author', build, launch_claude_author(prof, seed, u['files'], [e['path'] for e in ctx]),
-                     parse_claude_author(prof['model']), subject={'author': n})
+                     parse_claude_author(prof['model']), subject={'author': n, 'base': expected})
     base, rf = rjson(d / 'base.json'), d / 'result.json'
     need(rf.is_file(), f'{key}: нет записи результата автора (result.json) — повтор запрещён, см. {d}')
+    need(base.get('expected', expected) == expected, f'{key}: результат относится к другому кандидату ({str(base.get("expected"))[:10]}) — повтор запрещён, см. {d}')
     recorded, res_dir = rjson(rf), d / 'result'
     for x, h in recorded.items():   # сохранённая копия результата не менялась после записи
         need((res_dir / x).is_file() and sha((res_dir / x).read_bytes()) == h, f'{x}: сохранённый результат автора изменён после записи (хеши результата) — разбор тимлидом')
     allowed = set(u['files']) | set(base['context'])
     extra = [x for x in recorded if x not in allowed]
-    need(not extra, 'автор Claude создал файлы вне списка единицы и контекста: ' + ', '.join(sorted(extra)[:5]) + ' — результат не применён (репозиторий не тронут), вызов израсходован')
+    need(not extra, 'автор Claude создал файлы вне списка единицы и контекста: ' + ', '.join(sorted(extra)[:5]) + ' — результат не применён, вызов израсходован')
     bad_ctx = [x for x, h in base['context'].items() if recorded.get(x) != h]
     need(not bad_ctx, 'автор Claude изменил или удалил файлы контекста: ' + ', '.join(bad_ctx[:5]) + ' — результат не применён')
     gone = [f for f, h in base['unit'].items() if h is not None and f not in recorded]
@@ -1972,40 +1999,32 @@ def do_claude_author(task, uid, opts, note):
             raise Blocked(f'{x}: не UTF-8') from None
         need(not HIDDEN_RE.search(text), f'{x}: скрытые/управляющие символы')
         need(not SECRET_RE.search(text), f'{x}: похоже на секрет')
-        cur = file_hash(root, x)   # репозиторий: либо исходное состояние, либо уже применённый результат (повтор после обрыва); иное — чужая правка
-        # «исходное состояние» — и содержимое HEAD (хеш blob), и БАЙТЫ рабочей копии до вызова (они различаются при core.autocrlf: в HEAD LF, на диске CRLF)
-        origin = {base['unit'].get(x), recorded[x]} | ({base['disk'][x]} if x in (base.get('disk') or {}) else set())
-        wt = (Path(root) / x).read_bytes() if cur else b''
-        if cur and cur not in origin and sha(wt.replace(b'\r\n', b'\n')) == base['unit'].get(x):
-            cur = base['unit'].get(x)   # то же содержимое HEAD с окончаниями CRLF (git checkout/restore при autocrlf): для Git файл чист
-        need(cur in origin, f'{x}: в репозитории файл изменён вне агента и не совпадает ни с исходным, ни с результатом автора (хеши результата) — коммита нет')
-        # индекс проверяется отдельно от рабочего файла: `git add` ниже заменил бы staged-версию пользователя результатом автора. Допустимо:
-        # исходное содержимое HEAD, уже добавленный результат (повтор после обрыва между add и commit) и он же с LF (нормализация autocrlf)
-        idx = index_blob(root, x)
-        ok_idx = {base['unit'].get(x), recorded[x], sha(raw.replace(b'\r\n', b'\n'))}
-        if idx is not None and sha(idx) not in ok_idx:
-            keep = d / 'foreign-index' / x
-            keep.parent.mkdir(parents=True, exist_ok=True)
-            keep.write_bytes(idx)
-            raise Blocked(f'{x}: в индексе (staged) чужая версия файла единицы, не совпадающая ни с исходным, ни с результатом автора — коммита нет, '
-                          f'индекс и рабочий файл не тронуты; staged-версия сохранена копией в {keep}, результат автора — в {res_dir}. '
-                          'Разбери её (git diff --cached), закоммить или сними (git restore --staged) и повтори: новый вызов Claude не нужен')
-        need(idx is not None or base['unit'].get(x) is None, f'{x}: файл единицы снят с индекса (git rm --cached) вне агента — коммита нет; верни его в индекс и повтори')
-    foreign = [x for x in staged_names(root) if x not in u['files']]
-    need(not foreign, 'в индексе есть подготовленные (staged) изменения вне файлов единицы: ' + ', '.join(foreign[:5]) +
-         ' — коммита нет (чужая правка не должна попасть в коммит автора); результат автора сохранён в ' + str(res_dir))
-    for x in changed:   # перенос результата в репозиторий доверенным кодом (идемпотентно: уже применённое не переписывается)
-        if file_hash(root, x) != recorded[x]:
-            nolink(root, x, 'файл')
-            (Path(root) / x).parent.mkdir(parents=True, exist_ok=True)
-            (Path(root) / x).write_bytes((res_dir / x).read_bytes())
-    git(root, 'add', '--', *changed)
-    git(root, '-c', 'user.name=agent-claude', '-c', 'user.email=agent-claude@users.noreply.local', 'commit', '-m',
-        f'chore(agentq): {uid} claude author round {n} [{label}]', '--', *changed)   # --only: только перечисленные пути, а не весь индекс
-    u['author_applied'] = n
-    task.save()
-    say(f'Автор Claude {prof["model"]}/{prof["effort"]} [{prof["source"]}], раунд {n}: коммит {git(root, "rev-parse", "HEAD")[:10]}, файлов {len(changed)}. '
-        f'{res["result"][:300]}')
+    # рабочая копия агента: либо исходное состояние кандидата, либо уже перенесённый результат (повтор после обрыва между записью и коммитом)
+    dirty = worktree_dirty(wt)
+    need(set(dirty) <= set(changed), 'рабочая копия автора изменена вне агента: ' + ', '.join(sorted(set(dirty) - set(changed))[:5]) +
+         ' — результат автора сохранён в ' + str(res_dir))
+    for x in changed:
+        want = (res_dir / x).read_bytes()
+        ok = {base['unit'].get(x), recorded[x], sha(lf(want))}
+        p = wt / x
+        cur = sha(lf(p.read_bytes())) if p.is_file() else None
+        need(cur in ok, f'{x}: рабочая копия автора изменена вне агента (не исходное содержимое и не результат автора, хеши результата) — коммита нет')
+        idx = index_blob(wt, x)
+        need((sha(lf(idx)) if idx is not None else None) in ok, f'{x}: индекс рабочей копии автора изменён вне агента (хеши результата) — коммита нет')
+    for x in changed:   # перенос результата в рабочую копию агента доверенным кодом (идемпотентно)
+        p = wt / x
+        if not (p.is_file() and sha(lf(p.read_bytes())) in (recorded[x], sha(lf((res_dir / x).read_bytes())))):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes((res_dir / x).read_bytes())
+    git(wt, 'add', '--', *changed)
+    git(wt, '-c', 'user.name=agent-claude', '-c', 'user.email=agent-claude@users.noreply.local', 'commit', '-m',
+        f'chore(agentq): {uid} claude author round {n} [{label}]', '--', *changed)
+    rep = mod.check_diff(wt, rules, base=u['base'], allowed=u['files'])
+    need(not rep['violations'], 'нарушения зоны/списка файлов: ' + '; '.join(rep['violations']))
+    cand = git(wt, 'rev-parse', 'HEAD')
+    accept_author(task, uid, {'unmet_requirements': []}, n, cand)
+    say(f'Автор Claude {prof["model"]}/{prof["effort"]} [{prof["source"]}], раунд {n}: кандидат {cand[:10]} в {u["branch"]}, файлов {len(changed)} '
+        f'(ветка задачи и рабочее дерево не тронуты; дальше review {uid} или cycle, затем integrate {uid}). {res["result"][:300]}')
     return n
 
 
@@ -2450,10 +2469,16 @@ def waiver_valid(task, uid):
     return bool(w and len(w.get('reason', '').strip()) >= 20 and not unit_has_checks(task, uid))
 
 
+def cand_mode(u):
+    """Единица работает через кандидата в рабочей копии агента (frontend — всегда, backend — после первого author-claude): ревью, проверки
+    и приёмка — на SHA кандидата, в ветку задачи он попадает только через integrate."""
+    return u['kind'] == 'frontend' or bool(u.get('branch'))
+
+
 def verification(task, uid):
     """Чем подтверждена единица: 'checks' (успешные проверки на точном SHA), 'waived' (зафиксированное обоснование) или None."""
     u = task.unit(uid)
-    tip = (u['merged'] or u['candidate']) if u['kind'] == 'frontend' else u['reviewed']   # влитая слиянием единица подтверждается на итоговом SHA
+    tip = (u['merged'] or u['candidate']) if cand_mode(u) else u['reviewed']   # влитая слиянием единица подтверждается на итоговом SHA
     c = u['checks']
     if c and c.get('configured') and c.get('ok') is True and c['sha'] == tip:
         return 'checks'
@@ -2494,11 +2519,11 @@ def pending_n(task, uid, role, applied=None):
 
 def unmet_deps(task, uid):
     """Зависимости --after, которые ещё не готовы. Зависимая единица строится на HEAD: backend/protected — после PASS (его коммиты уже в ветке),
-    frontend — только после integrate, иначе её код в HEAD не попал бы."""
+    единица с кандидатом (frontend, backend автора Claude) — только после integrate, иначе её код в HEAD не попал бы."""
     out = []
     for dep in task.unit(uid)['after']:
         d = task.unit(dep)
-        if d['kind'] == 'frontend':
+        if cand_mode(d):
             if d['status'] != 'integrated':
                 out.append(f'сначала должна быть влита (integrate) единица {dep} (--after)')
         elif d['status'] not in ('accepted', 'integrated'):
@@ -2527,10 +2552,11 @@ def claim(task, uid):
     need(git(root, 'merge-base', '--is-ancestor', task.s['base'], head, check=False).returncode == 0, 'база задачи не предок HEAD')
     pend = unmet_deps(task, uid)
     need(not pend, pend[0] if pend else '', 5)
-    need(not git(root, 'status', '--porcelain', '--', *u['files']), 'файлы единицы изменены в рабочем дереве — они закреплены за автором Codex')
+    need(not git(root, 'status', '--porcelain', '--', *u['files']), 'файлы единицы изменены вне агента в рабочем дереве — закоммить или откати их: '
+         f'дальше они закреплены за автором {u["author"]} (его рабочая копия — отдельная, результат придёт через integrate)')
     if not u['base']:
         u['base'] = head   # зависимая единица берёт текущий HEAD и заново закрепляет файлы
-    u['branch'] = f'agent/codex/{task.s["id"]}-{uid}'
+    u['branch'] = f'agent/{u["author"]}/{task.s["id"]}-{uid}'
     wt = WORKTREES / f'{root.name}-aq-{task.s["id"]}-{uid}'
     u['worktree'] = str(wt)
     task.save()
@@ -2769,9 +2795,10 @@ def do_review(task, uid, effort, full, opts=None):
     root, u = task.root, task.unit(uid)
     fe = u['kind'] == 'frontend'
     need(fe or not opts.get('model'), '--model относится к Claude; у Codex-reviewer модель фиксирована (gpt-6.1-sol)')
-    if fe:
-        need(u['candidate'], f'{uid}: нет кандидата — сначала author/cycle')
+    if cand_mode(u):
+        need(u['candidate'], f'{uid}: нет кандидата — сначала ' + ('author/cycle' if fe else f'author-claude {uid} или cycle {uid} --task-file F'))
         tip = u['candidate']
+        need(git(root, 'merge-base', '--is-ancestor', u['base'], tip, check=False).returncode == 0, 'база единицы не предок кандидата')
     else:
         tip = git(root, 'rev-parse', 'HEAD')
         need(git(root, 'merge-base', '--is-ancestor', u['base'], tip, check=False).returncode == 0, 'база единицы не предок HEAD (смена ветки/rebase?)')
@@ -2894,17 +2921,36 @@ def route_opts(a):
 def cmd_cycle(a):
     t = Task(repo_root()).load()
     u = t.unit(a.uid)
-    need(u['kind'] == 'frontend', 'cycle — для frontend-единиц; у backend правки делает тимлид, затем review')
+    fe = u['kind'] == 'frontend'
+    if fe:
+        need(not getattr(a, 'task_file', None), '--task-file относится к автору Claude (backend); frontend-автору Codex задание строит движок')
+        author = lambda: do_author(t, a.uid, a.effort, a.wait)   # noqa: E731
+        ropts = route_opts(a)
+    else:
+        need(u['kind'] == 'backend' and getattr(a, 'task_file', None),
+             'cycle для backend — только с автором Claude: cycle <uid> --task-file F (задание автору); protected-единицы правит тимлид, затем review')
+        note = read_note(a.task_file)
+        aopts = route_opts(a)
+        if a.effort:
+            aopts['effort'] = a.effort
+
+        def author():
+            if not (u['worktree'] and Path(u['worktree']).exists()):
+                wait_deps(t, a.uid, a.wait)
+                pend = unmet_deps(t, a.uid)
+                need(not pend, pend[0] if pend else '', 5)
+            do_claude_author(t, a.uid, aopts, note)
+        ropts = {}   # признаки и --model относятся к автору Claude; reviewer backend — Codex с фиксированной моделью
     for _ in range(2 * t.s['budget']['author'] + 3):
         if u['status'] in ('accepted', 'integrated'):
             return 0
         cand, v = u['candidate'], u['verdict']
         if not cand:
-            do_author(t, a.uid, a.effort, a.wait)
+            author()
         elif u['checks'] and u['checks']['sha'] == cand and u['checks']['ok'] is False:
-            do_author(t, a.uid, a.effort, a.wait)
+            author()
         elif not v or v['sha'] != cand or v.get('integrity'):   # неоднозначный отчёт reviewer: автору нечего исправлять, ревью этого SHA повторяется
-            if do_review(t, a.uid, a.effort, False, route_opts(a)) == 0:
+            if do_review(t, a.uid, a.effort if fe else None, False, ropts) == 0:
                 u['status'] = 'accepted'
                 t.save()
                 say(f'PASS: {a.uid} принят на {cand[:10]}. Дальше: integrate {a.uid}')
@@ -2914,7 +2960,7 @@ def cmd_cycle(a):
             t.save()
             return 0
         else:
-            do_author(t, a.uid, a.effort, a.wait)   # FIX/UNCERTAIN возвращается автору автоматически
+            author()   # FIX/UNCERTAIN возвращается автору автоматически
     raise Blocked('цикл не сошёлся за допустимое число шагов', 2)
 
 
@@ -2922,7 +2968,7 @@ def cmd_integrate(a):
     root = repo_root()
     t = Task(root).load()
     u = t.unit(a.uid)
-    need(u['kind'] == 'frontend', 'integrate — для frontend-единиц; backend коммитит сам тимлид')
+    need(cand_mode(u), 'integrate — для единиц с кандидатом (frontend или backend автора Claude); остальные backend коммитит сам тимлид')
     if u['status'] == 'integrated':
         say(f'Единица {a.uid} уже влита: {(u["merged"] or u["candidate"])[:10]}.')
         return 0
@@ -3026,7 +3072,7 @@ def cmd_checks(a):
     uid = a.uid
     need(uid, 'укажи единицу: ' + (', '.join(t.s['units']) or 'единиц нет'))   # единица выбрана в main() ДО блокировки; здесь не угадывается
     u = t.unit(uid)
-    tip = (u['merged'] or u['candidate']) if u['kind'] == 'frontend' else git(t.root, 'rev-parse', 'HEAD')
+    tip = (u['merged'] or u['candidate']) if cand_mode(u) else git(t.root, 'rev-parse', 'HEAD')
     need(tip and tip != u['base'], f'{uid}: нет кандидата/коммитов задачи')
     c = apply_checks(t, uid, tip)
     say(f'Проверки {uid} на {tip[:10]}: ' + ('ПРОШЛИ' if c['ok'] else 'НЕ ПРОШЛИ' if c['ok'] is False else 'не применялись') + chr(10) + c['tail'])
@@ -3099,11 +3145,19 @@ def cmd_profile(a):
     return 0
 
 
-def cmd_author_claude(a):
-    t = Task(repo_root()).load()
-    note = Path(a.task_file).read_text(encoding='utf-8').strip()
+def read_note(path):
+    note = Path(path).read_text(encoding='utf-8').strip()
     need(note and len(note) <= 4000, 'задание автору: 1..4000 символов')
     need(not SECRET_RE.search(note), 'в задании найдено похожее на секрет')
+    return note
+
+
+def cmd_author_claude(a):
+    t = Task(repo_root()).load()
+    note = read_note(a.task_file)
+    if not (t.unit(a.uid)['worktree'] and Path(t.unit(a.uid)['worktree']).exists()):
+        pend = unmet_deps(t, a.uid)
+        need(not pend, pend[0] if pend else '', 5)
     opts = route_opts(a)
     if a.effort:
         opts['effort'] = a.effort
@@ -3129,8 +3183,8 @@ def accepted(task, uid):
         return False   # незакоммиченные правки принятых файлов
     if u['files'] and git(root, 'status', '--porcelain', '--untracked-files=all', '--', *spec):
         return False   # новые неотслеживаемые файлы в принятых путях (например, каталог единицы)
-    sha_ok = u['candidate'] if u['kind'] == 'frontend' else u['reviewed']
-    if u['kind'] == 'frontend' and u['status'] != 'integrated':
+    sha_ok = u['candidate'] if cand_mode(u) else u['reviewed']
+    if cand_mode(u) and u['status'] != 'integrated':
         return False
     # принятый SHA должен быть в истории текущей ветки, а файлы единицы после него не меняться
     if not sha_ok or git(root, 'merge-base', '--is-ancestor', sha_ok, 'HEAD', check=False).returncode != 0:
@@ -3161,7 +3215,7 @@ def cmd_status(a):
             say(f'      {fmt_findings(u)}')
         ctx = (v or {}).get('context')
         if ctx:
-            drift = context_drift(t, k, 'HEAD') if u['kind'] != 'frontend' or u['status'] == 'integrated' else []
+            drift = context_drift(t, k, 'HEAD') if not cand_mode(u) or u['status'] == 'integrated' else []
             say(f'      контекст ревью: {len(ctx)} файл(ов) ({", ".join(e["path"] + "@" + e["sha256"][:8] for e in ctx)})' +
                 (f'; ИЗМЕНИЛСЯ после ревью: {", ".join(drift)}' if drift else ''))
     for line in timing_lines(t):
@@ -3191,7 +3245,7 @@ def cmd_finish(a):
         for k, files in drifted.items():
             if files:
                 say(f'Контекст единицы {k} изменился после её PASS ({", ".join(files)}): PASS относится к прежней редакции контекста — ' +
-                    (f'нужно ревью на текущем SHA: review {k} (режим полного ревью выбирается автоматически).' if t.unit(k)['kind'] != 'frontend' else
+                    (f'нужно ревью на текущем SHA: review {k} (режим полного ревью выбирается автоматически).' if not cand_mode(t.unit(k)) else
                      'единица уже влита, её кандидат не пересматривается: решение Ивана — принять остаток как известное ограничение '
                      '(finish --abandon) либо проверить совместимость отдельной задачей (start --new-work).'))
         say('Приёмка: НЕ ПОДТВЕРЖДЕНА.' + (f' Нет независимого PASS на текущем SHA: {", ".join(no_pass)}.' if no_pass else '') +
@@ -3276,6 +3330,7 @@ def main(argv=None):
         s.add_argument('effort', nargs='?', choices=EFFORTS, default=None)
         if name == 'cycle':
             route_args(s)
+            s.add_argument('--task-file', help='backend: задание автору Claude (≤ 4000 символов); frontend — не нужен')
         s.add_argument('--wait', type=int, default=0, help='секунд ждать готовности зависимостей --after (без вызовов моделей); иначе код 5 WAIT')
     s = sub.add_parser('review')
     s.add_argument('rest', nargs='*')
