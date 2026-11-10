@@ -3005,6 +3005,28 @@ def t_model_routing():
     rc, _, err = x.cr('escalate', 'fe', 'review', '--cause', 'quality', 'третья ступень по подтверждённой нехватке качества')
     check('третья эскалация отклонена: решает Иван; лимит не зависит от усечения журнала профилей', rc == 2 and 'предел' in err, err)
 
+    # --- сбой на ручном профиле ниже границы не повышает границу
+    lo = mixed_proj('rt-esc-low')
+    lo.script('codex', [{'files': FILES_OK1}, {'files': FILES_OK2}, {'files': FILES_OK3}])
+    lo.script('claude', [UNC, UNC, UNC])
+    lo.cr('author', 'fe')
+    lo.cr('review', 'fe')
+    rc, out, err = lo.cr('escalate', 'fe', 'review', '--cause', 'quality', 'контекст проверен, сеть и квота в порядке, ответ неопределённый')
+    check('первая эскалация по UNCERTAIN на политике: граница sonnet/high', rc == 0 and rstate(lo)['units']['fe']['route']['floor'].get('review') == ['sonnet', 'high'], out + err)
+    lo.cr('author', 'fe')
+    rc, _, err = lo.cr('review', 'fe', 'medium', '--model', 'sonnet', '--reason', 'ручной выбор ниже границы для проверки эскалации')
+    check('ручной override sonnet/medium ниже границы допустим и вернул UNCERTAIN', rc == 1 and rstate(lo)['units']['fe']['verdict']['value'] == 'UNCERTAIN', err)
+    esc0 = list(rstate(lo)['units']['fe']['route']['esc'])
+    rc, _, err = lo.cr('escalate', 'fe', 'review', '--cause', 'quality', 'сбой на ручном профиле ниже границы, граница не проверялась')
+    r_ = rstate(lo)['units']['fe']['route']
+    check('UNCERTAIN на профиле ниже границы не повышает границу: отказ, граница и журнал эскалаций не изменены',
+          rc == 2 and 'ниже действующего профиля' in err and r_['floor'].get('review') == ['sonnet', 'high'] and r_['esc'] == esc0, err)
+    lo.cr('author', 'fe')
+    rc, _, err = lo.cr('review', 'fe')
+    rc2, out, err2 = lo.cr('escalate', 'fe', 'review', '--cause', 'quality', 'сбой на профиле границы sonnet/high подтверждён, контекст проверен')
+    check('после нового вызова на границе (sonnet/high) и сбоя на нём повышение допустимо: sonnet/high → opus/medium',
+          rc == 1 and rc2 == 0 and 'sonnet/high → opus/medium' in out and rstate(lo)['units']['fe']['route']['floor'].get('review') == ['opus', 'medium'], out + err + err2)
+
     # --- эскалация отталкивается от профиля вызова-основания
     for label, eff, want in (('rt-esc-top', 'high', None), ('rt-esc-mid', 'medium', 'opus/medium → opus/high')):
         z = mixed_proj(label)

@@ -3092,8 +3092,14 @@ def cmd_escalate(a):
     names = list(u['files']) or ([] if not u['base'] else git(t.root, 'diff', '--no-ext-diff', '--name-only', f'{u["base"]}..HEAD').splitlines())
     cur = choose_profile(t, a.uid, a.role, names)
     base = (cur['model'], cur['effort'])
-    if last and step_key((last['profile']['model'], last['profile']['effort'])) > step_key(base):
-        base = (last['profile']['model'], last['profile']['effort'])
+    if last:
+        lp = (last['profile']['model'], last['profile']['effort'])
+        # свидетельство сбоя должно быть получено на профиле не ниже действующего (политика или граница после прежней эскалации):
+        # ручной override ниже границы не доказывает, что граница не справилась, и повышать её не может
+        need(step_key(lp) >= step_key(base), f'последний вызов роли {a.role} выполнен на {lp[0]}/{lp[1]}, ниже действующего профиля {base[0]}/{base[1]}: '
+             'сбой на более низком профиле не основание повышать границу. Нужен новый вызов Claude на действующем или более высоком профиле и подтверждённый сбой на нём')
+        if step_key(lp) > step_key(base):
+            base = lp
     nxt = next_step(base)
     need(nxt, f'выше {base[0]}/{base[1]} ступеней нет: решает Иван (сузить требования или принять остаток)')
     u['route']['floor'][a.role] = list(nxt)
