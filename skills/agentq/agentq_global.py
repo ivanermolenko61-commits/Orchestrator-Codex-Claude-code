@@ -15,7 +15,6 @@
   review [uid] [low|medium|high] [--full]   независимое ревью другим сервисом
   profile <uid> author|review   предпросмотр профиля Claude (модель/effort) по политике, без вызова модели (журнал не меняет; --applied — сообщённое применение)
   author-claude <uid> --task-file F   автор Claude (backend-единица со списком файлов): реальный запуск claude -p с профилем по политике, коммит только файлов единицы
-  escalate <uid> author|review --cause quality "<основание>"   повысить профиль Claude на ступень при подтверждённой нехватке качества
                                 (review/cycle принимают --complexity --risk --model --reason: признаки и ручной выбор профиля Claude)
   integrate <uid>               кандидат frontend-единицы в ветку задачи после PASS и успешных проверок: ff-only, а если ветка ушла вперёд
                                 без файлов единицы — слияние без конфликтов, проверки на итоговом SHA до перемещения ветки
@@ -494,7 +493,6 @@ def normalize_state(s):
             u.setdefault(k, v)
         if not isinstance(u.get('route'), dict):   # выбор профиля Claude (1.4.0); у состояний прежних версий пуст
             u['route'] = new_route()
-        u['route'].setdefault('esc', [])
         u.setdefault('credited', [r['sha'] for r in u['rounds'] if r.get('progress') is True])   # SHA, за которые прогресс уже засчитан
         u.setdefault('open_review', (u.get('verdict') or {}).get('value') not in (None, 'PASS'))
         u.setdefault('review_applied', (u.get('verdict') or {}).get('n', 0))
@@ -739,9 +737,9 @@ def carry_unit(task, uid, u):
     u['open_checks'] = bool(m.get('open_checks'))
     u['findings'], u['finding_seq'] = copy.deepcopy(m.get('findings') or {}), m.get('finding_seq', 0)   # ID и статусы переходят вместе с расходом
     u['credited'] = list(m.get('credited') or [])   # зачтённые SHA переходят по цепочке: прогресс одного кандидата не начисляется заново
-    if isinstance(m.get('route'), dict):   # эскалации профиля и признаки не сбрасываются продолжением; старые записи — без маршрута
+    if isinstance(m.get('route'), dict):   # признаки профиля и журнал не сбрасываются продолжением; старые записи — без маршрута
         u['route'] = copy.deepcopy(m['route'])
-        u['route'].setdefault('features', {}), u['route'].setdefault('floor', {}), u['route'].setdefault('log', []), u['route'].setdefault('esc', [])
+        u['route'].setdefault('features', {}), u['route'].setdefault('log', [])
     u['findings_imported'] = m.get('findings_imported')   # запись без реестра (прежняя версия): импорт из отчёта при первом вызове, см. ensure_registry
     mine = verdicts.get(uid) or {}
     u['open_review'] = mine.get('value') not in (None, 'PASS')
@@ -1249,7 +1247,7 @@ def timing_lines(task):
 
 
 def route_lines(task):
-    """Профили Claude по вызовам: запрошенный (запись резерва), фактическая модель по данным CLI, токены и цена по прейскуранту; эскалации.
+    """Профили Claude по вызовам: запрошенный (запись резерва), фактическая модель по данным CLI, токены и цена по прейскуранту.
     Усилие CLI не сообщает — «фактическое усилие» не заявляется. Вызовы без записи профиля — прежней версии."""
     ends = {}
     d = task.dir / 'timing'
@@ -1277,8 +1275,6 @@ def route_lines(task):
         lines.append(f'  {key}: запрошен {pr["model"]}/{pr["effort"]} [{pr["source"]}: {pr["reason"]}]; фактическая модель по данным CLI: {fact}; усилие CLI не сообщает' +
                      (f'; цена по прейскуранту ${e["cost_usd"]:.4f}' if 'cost_usd' in e else ''))
     for k, u in task.s['units'].items():
-        for e in u['route']['esc']:
-            lines.append(f'  эскалация {e["role"]} {k}: {e["from"]} → {e["to"]} ({"; ".join(e["evidence"])})')
         for e in u['route']['log']:
             if e.get('event') == 'profile':
                 lines.append(f'  профиль {e["role"]} {k}: {e["model"]}/{e["effort"]} [{e["source"]}]; применение: ' +
@@ -1472,7 +1468,6 @@ HIGH_RISK = ('opus', 'high')
 MODEL_RANK = {'haiku': 0, 'sonnet': 1, 'opus': 2}
 EFFORT_RANK = {'low': 0, 'medium': 1, 'high': 2}
 LADDER = (('haiku', 'low'), ('haiku', 'medium'), ('sonnet', 'low'), ('sonnet', 'medium'), ('sonnet', 'high'), ('opus', 'medium'), ('opus', 'high'))
-MAX_ESCALATIONS = 2   # на роль и единицу (включая цепочку --continues): ступеней конечное число, зацикливания повышением нет
 # Минимальная версия Claude Code для актуальной модели алиаса (документация model-config): на более старой алиас указывает на прежнее
 # поколение, у которого поддержка effort другая. Сверяется с локальной версией, а не принимается на веру.
 MIN_CLI = {'haiku': (2, 1, 293), 'sonnet': (2, 1, 284), 'opus': (2, 1, 280)}
@@ -1499,7 +1494,7 @@ def step_key(step):
 
 
 def new_route():
-    return {'features': {}, 'floor': {}, 'log': [], 'esc': []}   # log — усекаемый журнал профилей, esc — эскалации (не усекается: их ≤ 2 на роль)
+    return {'features': {}, 'log': []}   # log — усекаемый журнал профилей
 
 
 def claude_version(claude):
@@ -1532,7 +1527,7 @@ def risk_signals(task, uid, names):
 
 
 def choose_profile(task, uid, role, names, opts=None):
-    """Профиль Claude для роли единицы. Приоритет: ручной параметр команды > эскалация (нижняя граница) > таблица политики. Движок-выведенные
+    """Профиль Claude для роли единицы. Приоритет: ручной параметр команды > таблица политики. Движок-выведенные
     признаки риска нельзя снять признаками координатора. Недоступная в установленном CLI ступень политики заменяется ближайшей ВЫШЕ и это
     записывается; ручной выбор недоступной комбинации не заменяется — отказ."""
     opts = opts or {}
@@ -1550,10 +1545,6 @@ def choose_profile(task, uid, role, names, opts=None):
     else:
         step = POLICY[role][cls]
     source = 'policy'
-    floor = (route.get('floor') or {}).get(role)
-    if floor and step_key(tuple(floor)) > step_key(step):
-        step, source = tuple(floor), 'escalation'
-        why.append(f'нижняя граница после эскалации {floor[0]}/{floor[1]}')
     claude = find_claude()
     need(claude, 'claude CLI не найден')
     version = claude_version(claude)
@@ -1578,10 +1569,6 @@ def choose_profile(task, uid, role, names, opts=None):
          'Haiku не может быть независимым reviewer: ревью Claude завершает приёмку исполняемой логики (выбери sonnet или opus; причина override это не меняет)')
     return {'model': step[0], 'effort': step[1], 'source': source, 'role': role, 'complexity': cls, 'risk': risk,
             'reason': '; '.join(why), 'cli': '.'.join(map(str, version))}
-
-
-def next_step(step):
-    return next((s for s in LADDER if step_key(s) > step_key(step)), None)
 
 
 def route_event(task, uid, **ev):
@@ -2656,7 +2643,6 @@ def accept_author(task, uid, res, n, head):
     u = task.unit(uid)
     u['candidate'], u['author_applied'] = head, n
     u['unmet'] = res['unmet_requirements']
-    u['unmet_call_at'] = (task.s['calls'].get(f'{uid}:author:{n}') or {}).get('at')
     u['checks'], u['verdict'] = None, None
     task.save()
 
@@ -2821,7 +2807,7 @@ def do_review(task, uid, effort, full, opts=None):
     call = task.s['calls'].get(f'{uid}:review:{n}') or {}
     ctx_meta, req_meta = call.get('context'), call.get('requirements')
     u['verdict'] = {'sha': tip, 'value': value, 'n': n, **({'context': ctx_meta} if ctx_meta else {}), **({'requirements': req_meta} if req_meta else {}),
-                    **({'integrity': True} if ap['integrity'] else {}), **({'call_at': call['at']} if call.get('at') else {})}
+                    **({'integrity': True} if ap['integrity'] else {})}
     u['reviewed'], u['last_report'], u['review_applied'] = tip, str(out), n
     note = ''
     last = u['rounds'][-1] if u['rounds'] else {}
@@ -3061,60 +3047,6 @@ def cmd_profile(a):
     return 0
 
 
-def cmd_escalate(a):
-    """Повышение профиля на одну ступень только при подтверждённой журналом нехватке качества. Бюджеты, история и защита от зацикливания не
-    затрагиваются: меняется лишь нижняя граница профиля следующих вызовов роли."""
-    t = Task(repo_root()).load()
-    u = t.unit(a.uid)
-    need(a.cause == 'quality', f'эскалация только при доказанной нехватке качества (--cause quality). Причина «{a.cause}» повышением модели или '
-         'усилия не исправляется: сеть, квота и отсутствующий контекст устраняются иначе (повтор позже, лимит, дополнение контекста)')
-    need((a.role == 'author') == (u['kind'] != 'frontend'), f'{a.uid}: у роли {a.role} в этой единице Claude не участвует')
-    note = a.note.strip()
-    need(len(note) >= 20, 'опиши, что подтверждено: контекст проверен, причина не в сети/квоте/контексте (≥ 20 символов)')
-    need(not SECRET_RE.search(note), 'в тексте найдено похожее на секрет')
-    v = u['verdict']
-    done = sum(1 for e in u['route']['esc'] if e.get('role') == a.role)
-    need(done < MAX_ESCALATIONS, f'уже {done} эскалации роли {a.role} в этой единице (предел {MAX_ESCALATIONS}): решает Иван — сузить требования или принять остаток')
-    # Каждое повышение требует НОВОГО вызова Claude этой роли (после прежней эскалации; записи вызовов не переходят в продолжение, поэтому после
-    # --continues основание пусто) и сбоя, относящегося именно к этому вызову: вердикт, выданный им, круг без прогресса после него, незакрытые
-    # требования, объявленные им. Старые stall/unmet/вердикт без нового вызова основанием не служат.
-    since = max((e.get('at', 0) for e in u['route']['esc'] if e.get('role') == a.role), default=0)
-    calls = [(k, c) for k, c in t.s['calls'].items() if c['unit'] == a.uid and c['role'] == a.role and c.get('kind') in CLAUDE_KINDS and c.get('profile')
-             and c.get('at', 0) > since]
-    last_kc = max(calls, key=lambda kc: kc[1]['at'], default=None)
-    last = last_kc[1] if last_kc else None
-    ev = []
-    if last:
-        rounds = u['rounds']
-        if a.role == 'review' and v and v['value'] == 'UNCERTAIN' and v.get('call_at') == last['at']:
-            ev.append('вердикт reviewer UNCERTAIN этого вызова')
-        if u['stall'] >= 1 and rounds and rounds[-1].get('at', 0) > last['at']:
-            ev.append(f'кругов без прогресса подряд: {u["stall"]} (последний круг — после этого вызова)')
-        if a.role == 'author' and u['unmet'] and u.get('unmet_call_at') == last['at']:
-            ev.append('автор объявил незакрытые требования: ' + '; '.join(u['unmet'])[:200])
-    need(ev, 'в журнале нет подтверждения нехватки качества, относящегося к новому вызову Claude (UNCERTAIN этого вызова, круг без прогресса после него, '
-         'незакрытые требования автора). FIX сам по себе — не основание; старое свидетельство (в том числе перенесённое --continues или оставшееся после '
-         'прежней эскалации) повышение не даёт: нужен новый вызов на действующем профиле и новый подтверждённый сбой')
-    basis = f'{last_kc[0]}@{last["at"]}|кругов={len(u["rounds"])}|вердикт={(str(v["n"]) + ":" + v["sha"][:10]) if v else "-"}'
-    names = list(u['files']) or ([] if not u['base'] else git(t.root, 'diff', '--no-ext-diff', '--name-only', f'{u["base"]}..HEAD').splitlines())
-    cur = choose_profile(t, a.uid, a.role, names)
-    base = (cur['model'], cur['effort'])
-    lp = (last['profile']['model'], last['profile']['effort'])
-    # сбой на профиле ниже действующего (ручной override ниже границы) границу не повышает
-    need(step_key(lp) >= step_key(base), f'последний вызов роли {a.role} выполнен на {lp[0]}/{lp[1]}, ниже действующего профиля {base[0]}/{base[1]}: '
-         'сбой на более низком профиле не основание повышать границу. Нужен новый вызов Claude на действующем или более высоком профиле и подтверждённый сбой на нём')
-    if step_key(lp) > step_key(base):
-        base = lp
-    nxt = next_step(base)
-    need(nxt, f'выше {base[0]}/{base[1]} ступеней нет: решает Иван (сузить требования или принять остаток)')
-    u['route']['floor'][a.role] = list(nxt)
-    u['route']['esc'].append({'at': time.time(), 'event': 'escalated', 'role': a.role, 'from': f'{base[0]}/{base[1]}', 'to': f'{nxt[0]}/{nxt[1]}',
-                              'evidence': ev, 'note': note, 'basis': basis})
-    t.save()
-    say(f'Эскалация {a.role} {a.uid}: {base[0]}/{base[1]} → {nxt[0]}/{nxt[1]}. Основание: {"; ".join(ev)}. Бюджет вызовов и история не изменены.')
-    return 0
-
-
 def cmd_author_claude(a):
     t = Task(repo_root()).load()
     note = Path(a.task_file).read_text(encoding='utf-8').strip()
@@ -3308,11 +3240,6 @@ def main(argv=None):
     s.add_argument('--task-file', required=True, help='задание автору (≤ 4000 символов)')
     s.add_argument('--effort', choices=EFFORTS)
     route_args(s)
-    s = sub.add_parser('escalate', help='повысить профиль Claude на ступень при подтверждённой нехватке качества')
-    s.add_argument('uid')
-    s.add_argument('role', choices=('author', 'review'))
-    s.add_argument('--cause', choices=('quality', 'network', 'quota', 'context', 'unknown'), required=True)
-    s.add_argument('note')
     s = sub.add_parser('integrate')
     s.add_argument('uid')
     s = sub.add_parser('checks')
@@ -3356,7 +3283,7 @@ def main(argv=None):
                 st.enter_context(Lock(root, f'unit-{uid}'))
             return {'author': cmd_author, 'cycle': cmd_cycle, 'review': cmd_review, 'integrate': cmd_integrate,
                     'checks': cmd_checks, 'waive': cmd_waive, 'rethink': cmd_rethink,
-                    'profile': cmd_profile, 'escalate': cmd_escalate, 'author-claude': cmd_author_claude}[a.cmd](a)
+                    'profile': cmd_profile, 'author-claude': cmd_author_claude}[a.cmd](a)
     except Blocked as e:
         print(f'{ {3: "LIMIT", 4: "BUSY", 5: "WAIT"}.get(e.code, "ERROR") }: {e}', file=sys.stderr)
         return e.code
