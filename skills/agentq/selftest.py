@@ -2986,7 +2986,7 @@ def t_model_routing():
           chain(x) == before == 2 and rstate(x)['budget'] == budget0 and sorted(rstate(x)['calls']) == calls0, (before, chain(x), budget0, rstate(x)['budget']))
     rc_dup, _, err_dup = x.cr('escalate', 'fe', 'review', '--cause', 'quality', 'то же свидетельство второй раз подряд, нового вызова Claude не было')
     check('одно свидетельство не даёт две эскалации: повтор без нового вызова Claude отклонён, журнал не изменён',
-          rc_dup == 2 and 'уже использовано' in err_dup and len(rstate(x)['units']['fe']['route']['esc']) == 1
+          rc_dup == 2 and 'нет подтверждения' in err_dup and len(rstate(x)['units']['fe']['route']['esc']) == 1
           and rstate(x)['units']['fe']['route']['floor'].get('review') == ['sonnet', 'high'], err_dup)
     rc, _, err = x.cr('escalate', 'fe', 'author', '--cause', 'quality', 'у frontend-автора Claude не участвует, это Codex')
     check('эскалация роли, где Claude не участвует, отклонена', rc == 2 and 'не участвует' in err, err)
@@ -3026,6 +3026,74 @@ def t_model_routing():
     rc2, out, err2 = lo.cr('escalate', 'fe', 'review', '--cause', 'quality', 'сбой на профиле границы sonnet/high подтверждён, контекст проверен')
     check('после нового вызова на границе (sonnet/high) и сбоя на нём повышение допустимо: sonnet/high → opus/medium',
           rc == 1 and rc2 == 0 and 'sonnet/high → opus/medium' in out and rstate(lo)['units']['fe']['route']['floor'].get('review') == ['opus', 'medium'], out + err + err2)
+
+    # --- свидетельство относится к новому вызову: старый stall/вердикт и продолжение (--continues) повышения не дают
+    cz = mixed_proj('rt-esc-fresh')
+    cz.script('codex', [{'files': FILES_OK1}, {'files': FILES_OK2}, {'files': FILES_OK3}])
+    cz.script('claude', [UNC, UNC, UNC])
+    why_ = 'контекст проверен, сеть и квота в порядке, сбой качества подтверждён'
+
+    def fl(x, role='review'):
+        return rstate(x)['units']['fe']['route']['floor'].get(role)
+
+    def nesc(x):
+        return len(rstate(x)['units']['fe']['route']['esc'])
+    cz.cr('author', 'fe')
+    cz.cr('review', 'fe')
+    rc, out, err = cz.cr('escalate', 'fe', 'review', '--cause', 'quality', why_)
+    check('свежесть: первая эскалация по UNCERTAIN нового вызова проходит', rc == 0 and fl(cz) == ['sonnet', 'high'], out + err)
+    cz.cr('author', 'fe')
+    rc, _, err = cz.cr('escalate', 'fe', 'review', '--cause', 'quality', why_)
+    check('свежесть: успешный вызов автора при старом вердикте UNCERTAIN — не основание: отказ, граница и журнал неизменны',
+          rc == 2 and 'нет подтверждения' in err and fl(cz) == ['sonnet', 'high'] and nesc(cz) == 1, err)
+    cz.cr('review', 'fe')   # второй UNCERTAIN на границе: повторное ревью открытого замечания даёт круг без прогресса
+    check('свежесть: условие проверки — перед продолжением накоплен stall ≥ 1', rstate(cz)['units']['fe']['stall'] >= 1, rstate(cz)['units']['fe']['stall'])
+    cz.cr('finish', '--abandon')
+    rc, _, err = cz.cr('start', 'rt-esc-fresh продолжение', '--id', 'rt-esc-fresh-2', '--kind', 'mixed', '--contract-file', cz.contract(), '--continues', 'rt-esc-fresh')
+    cz.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    u2 = rstate(cz)['units']['fe']
+    check('свежесть: продолжение переносит stall, границу и журнал эскалаций; записей вызовов нет (условие проверки)',
+          rc == 0 and u2['stall'] >= 1 and fl(cz) == ['sonnet', 'high'] and nesc(cz) == 1 and not rstate(cz)['calls'], str(u2['route']) + err)
+    rc, _, err = cz.cr('escalate', 'fe', 'review', '--cause', 'quality', why_)
+    check('свежесть: после --continues без нового сбоя повышение отклонено (stall перенесён, вызовов нет), граница и журнал не изменены',
+          rc == 2 and 'нет подтверждения' in err and fl(cz) == ['sonnet', 'high'] and nesc(cz) == 1, err)
+    cz.cr('author', 'fe')
+    rc, _, err = cz.cr('escalate', 'fe', 'review', '--cause', 'quality', why_)
+    check('свежесть: после --continues и успешного вызова автора со старым stall повышение отклонено', rc == 2 and 'нет подтверждения' in err and fl(cz) == ['sonnet', 'high'] and nesc(cz) == 1, err)
+    state_edit(cz, lambda s_: s_['units']['fe']['rounds'].append({'sha': 'b' * 40, 'progress': False, 'why': 'проверки не прошли', 'at': time.time()}))   # круг без вызова Claude
+    rc, _, err = cz.cr('escalate', 'fe', 'review', '--cause', 'quality', why_)
+    check('свежесть: круг без прогресса есть, но нового вызова Claude этой роли не было — повышение отклонено', rc == 2 and 'нет подтверждения' in err and fl(cz) == ['sonnet', 'high'] and nesc(cz) == 1, err)
+    rc_r, _, _ = cz.cr('review', 'fe')
+    rc, out, err = cz.cr('escalate', 'fe', 'review', '--cause', 'quality', why_)
+    check('свежесть: после нового вызова на границе (sonnet/high) и подтверждённого сбоя на нём повышение проходит: sonnet/high → opus/medium',
+          rc_r == 1 and rc == 0 and 'sonnet/high → opus/medium' in out and fl(cz) == ['opus', 'medium'] and nesc(cz) == 2, out + err)
+    rc, _, err = cz.cr('escalate', 'fe', 'review', '--cause', 'quality', why_)
+    check('свежесть: то же свидетельство повторно не применяется (ровно одно повышение на сбой)', rc == 2 and ('нет подтверждения' in err or 'предел' in err) and nesc(cz) == 2 and fl(cz) == ['opus', 'medium'], err)
+
+    # --- вердикт UNCERTAIN, выданный другим вызовом, не относится к новому вызову (ответ нового вызова отвергнут по модели)
+    nf = mixed_proj('rt-esc-nofresh')
+    nf.script('codex', [{'files': FILES_OK1}, {'files': FILES_OK2}])
+    nf.script('claude', [UNC, UNC])
+    why_ = 'контекст проверен, сеть и квота в порядке, сбой качества подтверждён'
+    nf.cr('author', 'fe')
+    nf.cr('review', 'fe')
+    nf.cr('escalate', 'fe', 'review', '--cause', 'quality', why_)
+    nf.cr('author', 'fe')
+    (nf.fake / 'claude_model.json').write_text(json.dumps('claude-sonnet-4-5'), encoding='utf-8')   # ответ прежнего поколения: вердикта не будет
+    rc_r, _, err_r = nf.cr('review', 'fe')
+    check('новый вызов на границе выполнен, но вердикта не выдал (модель не принята)', rc_r != 0 and 'MODEL' in err_r, err_r)
+    rc, _, err = nf.cr('escalate', 'fe', 'review', '--cause', 'quality', why_)
+    check('новый вызов без вердикта сбоя не доказывает: повышение отклонено, граница и журнал неизменны',
+          rc == 2 and 'нет подтверждения' in err and rstate(nf)['units']['fe']['route']['floor'].get('review') == ['sonnet', 'high']
+          and len(rstate(nf)['units']['fe']['route']['esc']) == 1, err)
+    state_edit(nf, lambda s_: s_['units']['fe'].update(verdict={'sha': 'a' * 40, 'value': 'UNCERTAIN', 'n': 9, 'call_at': 1.0}))   # вердикт другого (старого) вызова
+    rc, _, err = nf.cr('escalate', 'fe', 'review', '--cause', 'quality', why_)
+    check('вердикт UNCERTAIN другого вызова (иной call_at) не даёт основания новому вызову',
+          rc == 2 and 'нет подтверждения' in err and len(rstate(nf)['units']['fe']['route']['esc']) == 1, err)
+    last_at = max(c['at'] for c in rstate(nf)['calls'].values() if c['role'] == 'review')
+    state_edit(nf, lambda s_: s_['units']['fe']['verdict'].update(call_at=last_at))   # тот же вердикт, но выданный именно этим вызовом
+    rc, out, err = nf.cr('escalate', 'fe', 'review', '--cause', 'quality', why_)
+    check('тот же вердикт, выданный именно новым вызовом, основание даёт: sonnet/high → opus/medium', rc == 0 and 'sonnet/high → opus/medium' in out, out + err)
 
     # --- эскалация отталкивается от профиля вызова-основания
     for label, eff, want in (('rt-esc-top', 'high', None), ('rt-esc-mid', 'medium', 'opus/medium → opus/high')):
@@ -3067,6 +3135,42 @@ def t_claude_author():
         return p.git('rev-parse', 'HEAD')
 
     APP_C = 'def add(a, b):\n    return a + b  # claude\n'
+    # --- эскалация Claude-автора: основание — круг без прогресса ПОСЛЕ нового вызова автора на действующем профиле
+    APP_E1, APP_E2, APP_E3 = (f'def add(a, b):{chr(10)}    return a + b  # e{i}{chr(10)}' for i in (1, 2, 3))
+    ce = mixed_proj('ca-esc')
+    ce.script('claude', [{'edit': {'backend/app.py': APP_E1}, 'text': 'ok'}, {'edit': {'backend/app.py': APP_E2}, 'text': 'ok'}, {'edit': {'backend/app.py': APP_E3}, 'text': 'ok'}])
+    ce.script('codex', [{'text': '- [MAJOR] backend/app.py:2 — плохо.' + chr(10) + 'VERDICT: FIX'}, {'text': 'VERDICT: FIX'}, {'text': 'VERDICT: FIX'}])
+    why_ = 'контекст проверен, сеть и квота в порядке, сбой качества подтверждён'
+
+    def be_route(x):
+        return rstate(x)['units']['be']['route']
+    ce.cr('author-claude', 'be', '--task-file', note(ce))
+    rc, _, err = ce.cr('escalate', 'be', 'author', '--cause', 'quality', why_)
+    check('автор: без круга после вызова автора основания нет', rc == 2 and 'нет подтверждения' in err, err)
+    ce.cr('review', 'be')
+    ce.cr('author-claude', 'be', '--task-file', note(ce))
+    rc, _, err = ce.cr('review', 'be')
+    check('автор: второе ревью FIX без закрытых замечаний — круг без прогресса после вызова автора (условие проверки)',
+          rc == 1 and rstate(ce)['units']['be']['stall'] >= 1, err + str(rstate(ce)['units']['be']['stall']))
+    rc, out, err = ce.cr('escalate', 'be', 'author', '--cause', 'quality', why_)
+    check('автор: круг без прогресса после вызова автора — первая эскалация проходит (sonnet/medium → sonnet/high)', rc == 0 and 'sonnet/medium → sonnet/high' in out, out + err)
+    ce.cr('author-claude', 'be', '--task-file', note(ce))
+    rc, _, err = ce.cr('escalate', 'be', 'author', '--cause', 'quality', why_)
+    check('автор: успешный вызов автора на границе со старым stall не основание: отказ, граница и журнал неизменны',
+          rc == 2 and 'нет подтверждения' in err and be_route(ce)['floor'].get('author') == ['sonnet', 'high'] and len(be_route(ce)['esc']) == 1
+          and rstate(ce)['units']['be']['stall'] >= 1, err)
+    state_edit(ce, lambda s_: s_['units']['be'].update(stall=0, unmet=['старое требование'], unmet_call_at=1.0))   # незакрытое требование от другого (старого) вызова
+    rc, _, err = ce.cr('escalate', 'be', 'author', '--cause', 'quality', why_)
+    check('автор: незакрытые требования, объявленные другим вызовом, основанием нового вызова не служат',
+          rc == 2 and 'нет подтверждения' in err and len(be_route(ce)['esc']) == 1, err)
+    state_edit(ce, lambda s_: s_['units']['be'].update(stall=1, unmet=[], unmet_call_at=None))
+    ce.cr('review', 'be')
+    rc, out, err = ce.cr('escalate', 'be', 'author', '--cause', 'quality', why_)
+    check('автор: после нового вызова на границе и нового круга без прогресса повышение проходит: sonnet/high → opus/medium',
+          rc == 0 and 'sonnet/high → opus/medium' in out, out + err)
+    rc, _, err = ce.cr('escalate', 'be', 'author', '--cause', 'quality', why_)
+    check('автор: то же свидетельство повторно не применяется', rc == 2 and ('нет подтверждения' in err or 'предел' in err) and len(be_route(ce)['esc']) == 2, err)
+
     p = mixed_proj('ca-ok')
     p.script('claude', [{'edit': {'backend/app.py': APP_C}, 'text': 'готово: комментарий добавлен'}])
     rc, out, err = p.cr('author-claude', 'be', '--task-file', note(p), env={'CLAUDE_CODE_EFFORT_LEVEL': 'low', 'ANTHROPIC_MODEL': 'haiku'})

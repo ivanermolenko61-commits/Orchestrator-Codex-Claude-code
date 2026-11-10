@@ -2656,6 +2656,7 @@ def accept_author(task, uid, res, n, head):
     u = task.unit(uid)
     u['candidate'], u['author_applied'] = head, n
     u['unmet'] = res['unmet_requirements']
+    u['unmet_call_at'] = (task.s['calls'].get(f'{uid}:author:{n}') or {}).get('at')
     u['checks'], u['verdict'] = None, None
     task.save()
 
@@ -2820,7 +2821,7 @@ def do_review(task, uid, effort, full, opts=None):
     call = task.s['calls'].get(f'{uid}:review:{n}') or {}
     ctx_meta, req_meta = call.get('context'), call.get('requirements')
     u['verdict'] = {'sha': tip, 'value': value, 'n': n, **({'context': ctx_meta} if ctx_meta else {}), **({'requirements': req_meta} if req_meta else {}),
-                    **({'integrity': True} if ap['integrity'] else {})}
+                    **({'integrity': True} if ap['integrity'] else {}), **({'call_at': call['at']} if call.get('at') else {})}
     u['reviewed'], u['last_report'], u['review_applied'] = tip, str(out), n
     note = ''
     last = u['rounds'][-1] if u['rounds'] else {}
@@ -3071,35 +3072,39 @@ def cmd_escalate(a):
     note = a.note.strip()
     need(len(note) >= 20, 'опиши, что подтверждено: контекст проверен, причина не в сети/квоте/контексте (≥ 20 символов)')
     need(not SECRET_RE.search(note), 'в тексте найдено похожее на секрет')
-    v, ev = u['verdict'], []
-    if a.role == 'review' and v and v['value'] == 'UNCERTAIN':
-        ev.append('вердикт reviewer UNCERTAIN')
-    if u['stall'] >= 1:
-        ev.append(f'кругов без прогресса подряд: {u["stall"]}')
-    if a.role == 'author' and u['unmet']:
-        ev.append('автор объявил незакрытые требования: ' + '; '.join(u['unmet'])[:200])
-    need(ev, 'в журнале нет подтверждения нехватки качества (UNCERTAIN, круг без прогресса, незакрытые требования автора). FIX сам по себе — не основание: '
-         'автор исправляет замечания на прежнем профиле')
+    v = u['verdict']
     done = sum(1 for e in u['route']['esc'] if e.get('role') == a.role)
     need(done < MAX_ESCALATIONS, f'уже {done} эскалации роли {a.role} в этой единице (предел {MAX_ESCALATIONS}): решает Иван — сузить требования или принять остаток')
-    calls = [(k, c) for k, c in t.s['calls'].items() if c['unit'] == a.uid and c['role'] == a.role and c.get('kind') in CLAUDE_KINDS and c.get('profile')]
-    last_kc = max(calls, key=lambda kc: kc[1]['n'], default=None)   # вызов, на котором основано свидетельство (его профиль мог быть задан вручную выше политики)
+    # Каждое повышение требует НОВОГО вызова Claude этой роли (после прежней эскалации; записи вызовов не переходят в продолжение, поэтому после
+    # --continues основание пусто) и сбоя, относящегося именно к этому вызову: вердикт, выданный им, круг без прогресса после него, незакрытые
+    # требования, объявленные им. Старые stall/unmet/вердикт без нового вызова основанием не служат.
+    since = max((e.get('at', 0) for e in u['route']['esc'] if e.get('role') == a.role), default=0)
+    calls = [(k, c) for k, c in t.s['calls'].items() if c['unit'] == a.uid and c['role'] == a.role and c.get('kind') in CLAUDE_KINDS and c.get('profile')
+             and c.get('at', 0) > since]
+    last_kc = max(calls, key=lambda kc: kc[1]['at'], default=None)
     last = last_kc[1] if last_kc else None
-    basis = f'{last_kc[0] if last_kc else "-"}|кругов={len(u["rounds"])}|вердикт={(str(v["n"]) + ":" + v["sha"][:10]) if v else "-"}'
-    used = [e.get('basis') for e in u['route']['esc'] if e.get('role') == a.role]
-    need(basis not in used, f'это основание ({basis}) уже использовано для эскалации: следующая допустима только после нового вызова Claude на повышенном профиле '
-         'и нового подтверждённого сбоя качества (одно свидетельство не повышает профиль дважды)')
+    ev = []
+    if last:
+        rounds = u['rounds']
+        if a.role == 'review' and v and v['value'] == 'UNCERTAIN' and v.get('call_at') == last['at']:
+            ev.append('вердикт reviewer UNCERTAIN этого вызова')
+        if u['stall'] >= 1 and rounds and rounds[-1].get('at', 0) > last['at']:
+            ev.append(f'кругов без прогресса подряд: {u["stall"]} (последний круг — после этого вызова)')
+        if a.role == 'author' and u['unmet'] and u.get('unmet_call_at') == last['at']:
+            ev.append('автор объявил незакрытые требования: ' + '; '.join(u['unmet'])[:200])
+    need(ev, 'в журнале нет подтверждения нехватки качества, относящегося к новому вызову Claude (UNCERTAIN этого вызова, круг без прогресса после него, '
+         'незакрытые требования автора). FIX сам по себе — не основание; старое свидетельство (в том числе перенесённое --continues или оставшееся после '
+         'прежней эскалации) повышение не даёт: нужен новый вызов на действующем профиле и новый подтверждённый сбой')
+    basis = f'{last_kc[0]}@{last["at"]}|кругов={len(u["rounds"])}|вердикт={(str(v["n"]) + ":" + v["sha"][:10]) if v else "-"}'
     names = list(u['files']) or ([] if not u['base'] else git(t.root, 'diff', '--no-ext-diff', '--name-only', f'{u["base"]}..HEAD').splitlines())
     cur = choose_profile(t, a.uid, a.role, names)
     base = (cur['model'], cur['effort'])
-    if last:
-        lp = (last['profile']['model'], last['profile']['effort'])
-        # свидетельство сбоя должно быть получено на профиле не ниже действующего (политика или граница после прежней эскалации):
-        # ручной override ниже границы не доказывает, что граница не справилась, и повышать её не может
-        need(step_key(lp) >= step_key(base), f'последний вызов роли {a.role} выполнен на {lp[0]}/{lp[1]}, ниже действующего профиля {base[0]}/{base[1]}: '
-             'сбой на более низком профиле не основание повышать границу. Нужен новый вызов Claude на действующем или более высоком профиле и подтверждённый сбой на нём')
-        if step_key(lp) > step_key(base):
-            base = lp
+    lp = (last['profile']['model'], last['profile']['effort'])
+    # сбой на профиле ниже действующего (ручной override ниже границы) границу не повышает
+    need(step_key(lp) >= step_key(base), f'последний вызов роли {a.role} выполнен на {lp[0]}/{lp[1]}, ниже действующего профиля {base[0]}/{base[1]}: '
+         'сбой на более низком профиле не основание повышать границу. Нужен новый вызов Claude на действующем или более высоком профиле и подтверждённый сбой на нём')
+    if step_key(lp) > step_key(base):
+        base = lp
     nxt = next_step(base)
     need(nxt, f'выше {base[0]}/{base[1]} ступеней нет: решает Иван (сузить требования или принять остаток)')
     u['route']['floor'][a.role] = list(nxt)
