@@ -1880,6 +1880,7 @@ def do_claude_author(task, uid, opts, note):
              ' — коммит автора мог бы захватить чужую правку; закоммить или сними их (git restore --staged) до запуска автора')
         prof = choose_profile(task, uid, 'author', u['files'], opts)
         base_unit = {}
+        base_disk = {f: file_hash(root, f) for f in u['files']}   # байты рабочей копии до вызова автора (git status чист): с HEAD они могут не совпадать (autocrlf)
         for f in u['files']:   # файлы единицы берутся из коммита; с похожим на секрет — не передаются
             if git(root, 'ls-tree', 'HEAD', '--', f, check=False).stdout.strip():
                 text, h = context_blob(root, 'HEAD', f)
@@ -1891,7 +1892,7 @@ def do_claude_author(task, uid, opts, note):
         for e in ctx:
             seed[e['path']] = e['text'].encode('utf-8')
         d.mkdir(parents=True, exist_ok=True)
-        wjson(d / 'base.json', {'unit': base_unit, 'context': {e['path']: e['sha256'] for e in ctx}})   # до резерва вызова: сверка результата переживает обрыв
+        wjson(d / 'base.json', {'unit': base_unit, 'disk': base_disk, 'context': {e['path']: e['sha256'] for e in ctx}})   # до резерва вызова: сверка результата переживает обрыв
     ensure_registry(task, uid)
 
     def build():
@@ -1938,7 +1939,9 @@ def do_claude_author(task, uid, opts, note):
         need(not HIDDEN_RE.search(text), f'{x}: скрытые/управляющие символы')
         need(not SECRET_RE.search(text), f'{x}: похоже на секрет')
         cur = file_hash(root, x)   # репозиторий: либо исходное состояние, либо уже применённый результат (повтор после обрыва); иное — чужая правка
-        need(cur in (base['unit'].get(x), recorded[x]), f'{x}: в репозитории файл изменён вне агента и не совпадает ни с исходным, ни с результатом автора (хеши результата) — коммита нет')
+        # «исходное состояние» — и содержимое HEAD (хеш blob), и БАЙТЫ рабочей копии до вызова (они различаются при core.autocrlf: в HEAD LF, на диске CRLF)
+        origin = {base['unit'].get(x), recorded[x]} | ({base['disk'][x]} if x in (base.get('disk') or {}) else set())
+        need(cur in origin, f'{x}: в репозитории файл изменён вне агента и не совпадает ни с исходным, ни с результатом автора (хеши результата) — коммита нет')
     foreign = [x for x in staged_names(root) if x not in u['files']]
     need(not foreign, 'в индексе есть подготовленные (staged) изменения вне файлов единицы: ' + ', '.join(foreign[:5]) +
          ' — коммита нет (чужая правка не должна попасть в коммит автора); результат автора сохранён в ' + str(res_dir))

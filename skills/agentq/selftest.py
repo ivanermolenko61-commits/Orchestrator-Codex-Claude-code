@@ -3046,6 +3046,65 @@ def t_claude_author():
     state_edit(q, lambda s_: s_['units']['be'].update(author_applied=0))
     rc, out, err = q.cr('author-claude', 'be', '--task-file', note(q))
     check('восстановление: коммит уже есть, состояние не сохранено — дописано без нового вызова Claude', rc == 0 and len(ca(q)) == 1 and 'вызов не повторялся' in out, out + err)
+    # --- окончания строк: в HEAD LF, в рабочей копии CRLF (core.autocrlf=true), git status чист; результат автора идёт от LF-контента HEAD
+    def crlf_proj(label, crlf=True):
+        x = mixed_proj(label)
+        x.script('claude', [{'edit': {'backend/app.py': APP_C}, 'text': 'готово'}])
+        if crlf:
+            x.git('config', 'core.autocrlf', 'true')
+            (x.repo / 'backend/app.py').unlink()
+            x.git('checkout', '--', 'backend/app.py')   # CRLF-копия так, как её делает сам Git при autocrlf=true: индекс актуален, git status чист
+        return x
+
+    def app_bytes(x):
+        return (x.repo / 'backend/app.py').read_bytes()
+
+    c = crlf_proj('ca-crlf')
+    clean0 = not c.git('status', '--porcelain') and b'\r\n' in app_bytes(c) and '\r' not in c.git('show', 'HEAD:backend/app.py')
+    rc, out, err = c.cr('author-claude', 'be', '--task-file', note(c))
+    check('CRLF: условие проверки — HEAD с LF, рабочая копия с CRLF, git status чист; результат автора применён и закоммичен (1 вызов Claude)',
+          clean0 and rc == 0 and len(ca(c)) == 1 and 'aq:ca-crlf/be/a1' in c.git('log', '-1', '--format=%s'), f'{clean0} {out} {err}')
+    check('CRLF: коммит содержит только правку автора (1 строка добавлена, 1 удалена), без пересохранения всего файла; git status чист',
+          c.git('diff', '--numstat', 'HEAD~1', 'HEAD', '--', 'backend/app.py').split()[:2] == ['1', '1'] and '\r' not in c.git('show', 'HEAD:backend/app.py')
+          and c.git('show', 'HEAD:backend/app.py').replace('\r', '') == APP_C.strip() and not c.git('status', '--porcelain'), c.git('status', '--porcelain'))
+    state_edit(c, lambda s_: s_['units']['be'].update(author_applied=0))
+    rc, out, err = c.cr('author-claude', 'be', '--task-file', note(c))
+    check('CRLF: обрыв после коммита, до сохранения состояния — коммит узнан по результату, без нового вызова Claude',
+          rc == 0 and len(ca(c)) == 1 and 'вызов не повторялся' in out and c.git('rev-list', '--count', 'HEAD') == '2', out + err)
+
+    w = crlf_proj('ca-crlf-w')
+    w.cr('author-claude', 'be', '--task-file', note(w))
+    w.git('reset', '--mixed', 'HEAD~1')   # файл записан в репозиторий, коммита нет
+    state_edit(w, lambda s_: s_['units']['be'].update(author_applied=0))
+    st_w = w.git('status', '--porcelain').splitlines()
+    check('CRLF: файл применён, коммита нет — git status показывает только правку автора (один файл, 1 строка изменена)',
+          [l.strip() for l in st_w] == ['M backend/app.py'] and w.git('diff', '--numstat', '--', 'backend/app.py').split()[:2] == ['1', '1'], str(st_w))
+    rc, out, err = w.cr('author-claude', 'be', '--task-file', note(w))
+    check('CRLF: обрыв между записью файла и коммитом — применённый результат узнан, коммит дописан без нового вызова Claude',
+          rc == 0 and len(ca(w)) == 1 and 'aq:ca-crlf-w/be/a1' in w.git('log', '-1', '--format=%s') and not w.git('status', '--porcelain')
+          and w.git('show', 'HEAD:backend/app.py').replace('\r', '') == APP_C.strip(), out + err)
+
+    r = crlf_proj('ca-crlf-r')
+    r.cr('author-claude', 'be', '--task-file', note(r))
+    r.git('reset', '--hard', 'HEAD~1')   # результат сохранён, в репозиторий не перенесён: рабочая копия снова CRLF
+    state_edit(r, lambda s_: s_['units']['be'].update(author_applied=0))
+    back = b'\r\n' in app_bytes(r) and not r.git('status', '--porcelain')
+    rc, out, err = r.cr('author-claude', 'be', '--task-file', note(r))
+    check('CRLF: обрыв до переноса результата — повтор применяет сохранённый результат на CRLF-копии без нового вызова Claude',
+          back and rc == 0 and len(ca(r)) == 1 and 'aq:ca-crlf-r/be/a1' in r.git('log', '-1', '--format=%s') and not r.git('status', '--porcelain'), f'{back} {out} {err}')
+
+    for label, crlf, tail in (('ca-crlf-f', True, b'# foreign\r\n'), ('ca-lf-f', False, b'# foreign\n')):
+        f = crlf_proj(label, crlf)
+        f.cr('author-claude', 'be', '--task-file', note(f))
+        f.git('reset', '--hard', 'HEAD~1')
+        with open(f.repo / 'backend/app.py', 'ab') as fh:   # реальная посторонняя правка после вызова автора
+            fh.write(tail)
+        state_edit(f, lambda s_: s_['units']['be'].update(author_applied=0))
+        h1, mine = f.git('rev-parse', 'HEAD'), app_bytes(f)
+        rc, out, err = f.cr('author-claude', 'be', '--task-file', note(f))
+        check(f'{"CRLF" if crlf else "LF"}: посторонняя правка файла после вызова автора по-прежнему блокирует применение: отказ, файл и HEAD не тронуты, Claude не вызывался заново',
+              rc == 2 and 'изменён вне агента' in err and app_bytes(f) == mine and f.git('rev-parse', 'HEAD') == h1 and len(ca(f)) == 1, out + err)
+
     # изменение вне списка файлов
     o = mixed_proj('ca-out')
     h0 = head(o)
