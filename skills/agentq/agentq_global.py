@@ -1780,29 +1780,55 @@ def launch_claude_author(profile, seed, files, context_files):
         claude = find_claude()
         need(claude, 'claude CLI не найден')
         work = Path(tempfile.mkdtemp(prefix='aq-author-'))
+        d.mkdir(parents=True, exist_ok=True)
+        wjson(d / 'work.json', {'work': str(work)})   # до запуска: обрыв между завершением процесса и сохранением результата восстановим с этой копии
+        for x, raw in seed.items():
+            f = work / x
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(raw)
+        cmd = [*claude, '-p', '--model', profile['model'], '--effort', profile['effort'], '--output-format', 'json', '--tools', 'Read,Edit,Write',
+               '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--setting-sources', '',
+               '--settings', json.dumps(claude_author_settings(files, context_files)), '--disable-slash-commands', '--no-session-persistence',
+               '--max-turns', '15', '--system-prompt', CLAUDE_AUTHOR_SYSTEM]
         try:
-            for x, raw in seed.items():
-                f = work / x
-                f.parent.mkdir(parents=True, exist_ok=True)
-                f.write_bytes(raw)
-            cmd = [*claude, '-p', '--model', profile['model'], '--effort', profile['effort'], '--output-format', 'json', '--tools', 'Read,Edit,Write',
-                   '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--setting-sources', '',
-                   '--settings', json.dumps(claude_author_settings(files, context_files)), '--disable-slash-commands', '--no-session-persistence',
-                   '--max-turns', '15', '--system-prompt', CLAUDE_AUTHOR_SYSTEM]
             out = spawn(cmd, d, prompt, 'claude-author', work, stdout_to='stdout.json')
-            got = workspace_files(work)
-            res_dir = d / 'result'
-            shutil.rmtree(res_dir, ignore_errors=True)
-            for x, raw in got.items():
-                f = res_dir / x
-                f.parent.mkdir(parents=True, exist_ok=True)
-                f.write_bytes(raw)
-            wjson(d / 'result.json', {x: sha(raw) for x, raw in got.items()})
-            if out.stat().st_size:
-                wtext(d / 'raw.txt', out.read_text(encoding='utf-8'))
-        finally:
+        except Blocked:   # процесс не завершился успешно (таймаут, прерывание, код ≠ 0): результата нет, копия не нужна
             shutil.rmtree(work, ignore_errors=True)
+            raise
+        capture_author_result(d, work, out)   # копия удаляется внутри, только после записи результата, его хешей и ответа
     return go
+
+
+def capture_author_result(d, work, out):
+    """Сохранение результата автора из временной копии: файлы → result/, хеши → result.json, ответ CLI → raw.txt. Копия удаляется ТОЛЬКО
+    после этого; обрыв на любом шаге оставляет её на месте, и повтор снимает результат заново без нового вызова (recover_author_workspace)."""
+    got = workspace_files(work)
+    res_dir = d / 'result'
+    shutil.rmtree(res_dir, ignore_errors=True)
+    for x, raw in got.items():
+        f = res_dir / x
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(raw)
+    wjson(d / 'result.json', {x: sha(raw) for x, raw in got.items()})
+    if out.stat().st_size:
+        wtext(d / 'raw.txt', out.read_text(encoding='utf-8'))
+    shutil.rmtree(work, ignore_errors=True)
+
+
+def recover_author_workspace(d):
+    """Повтор после обрыва между завершением процесса автора и сохранением результата: если временная копия (work.json) ещё на месте,
+    процесс не выполняется и ответ CLI записан, результат снимается с копии без нового вызова. Иначе ничего не делается — отказ даёт
+    обычная проверка записи вызова (ответа нет / вызов выполняется)."""
+    wj, out = d / 'work.json', d / 'stdout.json'
+    if (d / 'raw.txt').is_file() or not wj.is_file():
+        return
+    work = Path(rjson(wj)['work'])
+    if not work.is_dir() or (d / 'failed.json').exists() or not out.is_file() or not out.stat().st_size:
+        return
+    pj = d / 'process.json'
+    if pj.exists():
+        need(not pid_alive(rjson(pj)['pid']), f'BUSY: вызов автора ещё выполняется, см. {d}', 4)
+    capture_author_result(d, work, out)
 
 
 def parse_claude_author(expect):
@@ -1848,6 +1874,12 @@ def staged_names(root):
     return git(root, 'diff', '--cached', '--name-only').splitlines()
 
 
+def index_blob(root, x):
+    """Байты файла из индекса (staged-версия) либо None, если в индексе его нет. Читается plumbing-командой, без фильтров рабочего дерева."""
+    r = subprocess.run(['git', '-c', 'core.fsmonitor=false', '-C', str(root), 'cat-file', 'blob', f':{x}'], capture_output=True, timeout=120, env=clean_env())
+    return r.stdout if r.returncode == 0 else None
+
+
 def do_claude_author(task, uid, opts, note):
     root, u = task.root, task.unit(uid)
     need(u['kind'] == 'backend' and u['files'], f'{uid}: автора Claude движок запускает только для backend-единицы со списком файлов (клиентский код пишет Codex, '
@@ -1864,6 +1896,8 @@ def do_claude_author(task, uid, opts, note):
     d = task.dir / 'calls' / f'{uid}-author-{n}'
     label = f'aq:{task.s["id"]}/{uid}/a{n}'
     known = task.s['calls'].get(key)
+    if known:
+        recover_author_workspace(d)   # обрыв после процесса, до сохранения результата: результат снимается с сохранённой копии, вызова нет
     seed, ctx = {}, []   # содержимое временной копии и контекст нового запроса; при восстановлении (вызов уже сделан) запрос не строится
     done_sha = round_commit(root, u, label, d) if known else None   # коммит сделан, состояние не сохранено (обрыв): дописываем без нового вызова
     if done_sha:
@@ -1941,7 +1975,22 @@ def do_claude_author(task, uid, opts, note):
         cur = file_hash(root, x)   # репозиторий: либо исходное состояние, либо уже применённый результат (повтор после обрыва); иное — чужая правка
         # «исходное состояние» — и содержимое HEAD (хеш blob), и БАЙТЫ рабочей копии до вызова (они различаются при core.autocrlf: в HEAD LF, на диске CRLF)
         origin = {base['unit'].get(x), recorded[x]} | ({base['disk'][x]} if x in (base.get('disk') or {}) else set())
+        wt = (Path(root) / x).read_bytes() if cur else b''
+        if cur and cur not in origin and sha(wt.replace(b'\r\n', b'\n')) == base['unit'].get(x):
+            cur = base['unit'].get(x)   # то же содержимое HEAD с окончаниями CRLF (git checkout/restore при autocrlf): для Git файл чист
         need(cur in origin, f'{x}: в репозитории файл изменён вне агента и не совпадает ни с исходным, ни с результатом автора (хеши результата) — коммита нет')
+        # индекс проверяется отдельно от рабочего файла: `git add` ниже заменил бы staged-версию пользователя результатом автора. Допустимо:
+        # исходное содержимое HEAD, уже добавленный результат (повтор после обрыва между add и commit) и он же с LF (нормализация autocrlf)
+        idx = index_blob(root, x)
+        ok_idx = {base['unit'].get(x), recorded[x], sha(raw.replace(b'\r\n', b'\n'))}
+        if idx is not None and sha(idx) not in ok_idx:
+            keep = d / 'foreign-index' / x
+            keep.parent.mkdir(parents=True, exist_ok=True)
+            keep.write_bytes(idx)
+            raise Blocked(f'{x}: в индексе (staged) чужая версия файла единицы, не совпадающая ни с исходным, ни с результатом автора — коммита нет, '
+                          f'индекс и рабочий файл не тронуты; staged-версия сохранена копией в {keep}, результат автора — в {res_dir}. '
+                          'Разбери её (git diff --cached), закоммить или сними (git restore --staged) и повтори: новый вызов Claude не нужен')
+        need(idx is not None or base['unit'].get(x) is None, f'{x}: файл единицы снят с индекса (git rm --cached) вне агента — коммита нет; верни его в индекс и повтори')
     foreign = [x for x in staged_names(root) if x not in u['files']]
     need(not foreign, 'в индексе есть подготовленные (staged) изменения вне файлов единицы: ' + ', '.join(foreign[:5]) +
          ' — коммита нет (чужая правка не должна попасть в коммит автора); результат автора сохранён в ' + str(res_dir))

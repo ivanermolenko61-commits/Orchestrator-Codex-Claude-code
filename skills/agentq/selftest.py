@@ -3105,6 +3105,49 @@ def t_claude_author():
         check(f'{"CRLF" if crlf else "LF"}: посторонняя правка файла после вызова автора по-прежнему блокирует применение: отказ, файл и HEAD не тронуты, Claude не вызывался заново',
               rc == 2 and 'изменён вне агента' in err and app_bytes(f) == mine and f.git('rev-parse', 'HEAD') == h1 and len(ca(f)) == 1, out + err)
 
+    # --- индекс: чужая staged-версия файла единицы (рабочий файл исходный) — остановка до переноса, индекс и файл не тронуты, результат доступен
+    def idx_bytes(x):
+        return subprocess.run(['git', '-C', str(x.repo), 'cat-file', 'blob', ':backend/app.py'], capture_output=True).stdout
+
+    g1 = mixed_proj('ca-staged')
+    g1.script('claude', [{'edit': {'backend/app.py': APP_C}, 'text': 'готово'}])
+    g1.cr('author-claude', 'be', '--task-file', note(g1))
+    g1.git('reset', '--hard', 'HEAD~1')   # результат сохранён, в репозиторий не перенесён (обрыв до переноса)
+    state_edit(g1, lambda s_: s_['units']['be'].update(author_applied=0))
+    (g1.repo / 'backend/app.py').write_bytes(b'def add(a, b):\n    return a + b  # user staged\n')
+    g1.git('add', '--', 'backend/app.py')
+    g1.git('restore', '--source=HEAD', '--worktree', '--', 'backend/app.py')   # чужая версия только в индексе, рабочий файл снова исходный
+    idx0, wt0, h1 = idx_bytes(g1), app_bytes(g1), head(g1)
+    cd1 = g1.repo / '.ai/task/calls/be-author-1'
+    rc, out, err = g1.cr('author-claude', 'be', '--task-file', note(g1))
+    check('индекс: чужая staged-версия файла единицы — отказ до переноса, Claude не вызывался заново, HEAD не изменён',
+          b'user staged' in idx0 and rc == 2 and 'чужая версия' in err and len(ca(g1)) == 1 and head(g1) == h1, f'{idx0} {out} {err}')
+    check('индекс: staged-версия пользователя осталась побайтно прежней, рабочий файл не тронут, копия staged-версии и результат автора сохранены',
+          idx_bytes(g1) == idx0 and app_bytes(g1) == wt0 and (cd1 / 'foreign-index/backend/app.py').read_bytes() == idx0
+          and (cd1 / 'result/backend/app.py').read_text(encoding='utf-8') == APP_C, err)
+    g1.git('restore', '--staged', '--', 'backend/app.py')   # пользователь снял свою версию с индекса
+    rc, out, err = g1.cr('author-claude', 'be', '--task-file', note(g1))
+    check('индекс: после снятия чужой версии повтор применяет сохранённый результат без нового вызова Claude',
+          rc == 0 and len(ca(g1)) == 1 and 'aq:ca-staged/be/a1' in g1.git('log', '-1', '--format=%s') and not g1.git('status', '--porcelain'), out + err)
+
+    # --- обрыв между завершением процесса автора и сохранением результата: временная копия остаётся, повтор снимает результат без вызова
+    i2 = mixed_proj('ca-interrupt')
+    i2.script('claude', [{'edit': {'backend/app.py': APP_C}, 'text': 'готово'}])
+    cd2 = i2.repo / '.ai/task/calls/be-author-1'
+    cd2.mkdir(parents=True)
+    (cd2 / 'result').write_bytes(b'')   # сохранение результата сорвётся сразу после завершения процесса (замена прерывания в этой точке)
+    h2 = head(i2)
+    rc, out, err = i2.cr('author-claude', 'be', '--task-file', note(i2))
+    work2 = Path(json.loads((cd2 / 'work.json').read_text(encoding='utf-8'))['work']) if (cd2 / 'work.json').is_file() else None
+    check('обрыв после процесса: вызов израсходован, ответа и результата нет, временная копия с правками Claude сохранена, HEAD не изменён',
+          rc != 0 and len(ca(i2)) == 1 and not (cd2 / 'raw.txt').exists() and not (cd2 / 'result.json').exists() and work2 is not None and work2.is_dir()
+          and (work2 / 'backend/app.py').read_text(encoding='utf-8') == APP_C and head(i2) == h2, f'{rc} {out} {err} {work2}')
+    (cd2 / 'result').unlink()
+    rc, out, err = i2.cr('author-claude', 'be', '--task-file', note(i2))
+    check('обрыв после процесса: повтор снимает результат с сохранённой копии, применяет и коммитит без нового вызова Claude; копия удалена',
+          rc == 0 and len(ca(i2)) == 1 and 'aq:ca-interrupt/be/a1' in i2.git('log', '-1', '--format=%s') and (cd2 / 'result.json').is_file()
+          and (cd2 / 'receipt.json').is_file() and not work2.exists() and (i2.repo / 'backend/app.py').read_text(encoding='utf-8') == APP_C, out + err)
+
     # изменение вне списка файлов
     o = mixed_proj('ca-out')
     h0 = head(o)
@@ -3116,8 +3159,9 @@ def t_claude_author():
           and not (o.repo / 'backend/other.py').exists() and not o.git('status', '--porcelain'), err + err2)
     e_ = mixed_proj('ca-empty')
     e_.script('claude', [{'edit': {}}])
+    h_e = head(e_)
     rc, _, err = e_.cr('author-claude', 'be', '--task-file', note(e_))
-    check('пустая правка автора Claude отклонена', rc == 2 and 'пустая правка' in err and head(e_) == e_.git('rev-parse', 'HEAD'), err)
+    check('пустая правка автора Claude отклонена, HEAD не изменён', rc == 2 and 'пустая правка' in err and head(e_) == h_e, err)
     d_ = mixed_proj('ca-del')
     d_.script('claude', [{'rm': ['backend/app.py']}])
     rc, _, err = d_.cr('author-claude', 'be', '--task-file', note(d_))
