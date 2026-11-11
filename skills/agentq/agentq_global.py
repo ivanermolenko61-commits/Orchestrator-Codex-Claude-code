@@ -1225,6 +1225,8 @@ def timing_summary(task):
                 runs.setdefault(e['id'], {}).setdefault('end', e)
             elif e.get('ev') == 'recovered':
                 recovered.add(e['id'])
+                if e.get('tokens'):   # расход вызова, оборванного до записи end: учитывается один раз, если end с токенами нет
+                    runs.setdefault(e['id'], {}).setdefault('rtok', e)
     stages = {s: {'n': 0, 'sec': 0.0, 'unknown': 0, 'running': 0, 'req': 0, 'resp': 0} for s in ('author', 'review', 'checks', 'wait')}
     spans, tokens, usage = [], [], {}
     for r in runs.values():
@@ -1245,6 +1247,10 @@ def timing_summary(task):
             s['running'] += 1
         else:
             s['unknown'] += 1
+    for r in runs.values():
+        rt = r.get('rtok')
+        if rt and not (r.get('end') or {}).get('tokens'):
+            add_usage(usage, rt.get('stage'), service_of(rt.get('kind') or (r.get('start') or {}).get('kind')), rt['tokens'])
     for key, c in task.s['calls'].items():   # вызовы без записей времени (состояние прежней версии)
         if key not in runs and c.get('role') in stages:
             stages[c['role']]['unknown'] += 1
@@ -1364,7 +1370,7 @@ CAUSE_RU = {'first': 'первый', 'continues': 'продолжение цеп
             'unknown': 'неизвестно'}
 
 
-def call_cause(task, uid, role, n):
+def call_cause(task, uid, role, n, subject=None):
     """Причина вызова — только по фактам состояния на момент резерва (без модели): прошлый вызов той же роли без receipt — сбой CLI; автор после
     красных проверок кандидата или вердикта не-PASS; ревью после неоднозначного отчёта или нового кандидата. Не подтверждается — unknown."""
     u = task.unit(uid)
@@ -1380,7 +1386,7 @@ def call_cause(task, uid, role, n):
         if v.get('value') in ('FIX', 'UNCERTAIN'):
             return 'review_fix'
         return 'unknown'
-    if v.get('integrity'):
+    if v.get('integrity') and (subject or {}).get('tip') == v.get('sha'):   # повтор неоднозначного отчёта — только на том же SHA
         return 'integrity'
     return 'new_candidate' if v.get('sha') else 'unknown'
 
@@ -1443,7 +1449,8 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
         need(raw.exists(), f'{key}: вызов начат, но ответа нет (сбой/таймаут/неопределённый исход) — автоматический повтор запрещён, см. {d}')
         result = parser(raw.read_text(encoding='utf-8'))
         wjson(rec, stamp({'binding': sha(kind + '\0' + text), 'result': result}))
-        tlog(task, uid, ev='recovered', stage=role, id=key, source='raw')
+        rtok = codex_usage(d / 'events.jsonl') if kind in CODEX_KINDS else usage_tokens(kind, raw.read_text(encoding='utf-8'))
+        tlog(task, uid, ev='recovered', stage=role, id=key, source='raw', kind=kind, **({'tokens': rtok} if rtok else {}))
         return result
     text, meta = build()   # до резерва: недопустимый контекст останавливает вызов без расхода
     # Параллельные единицы делят общий бюджет: свежее состояние, проверка предела и резерв — одна транзакция под блокировкой, иначе два
@@ -1456,7 +1463,7 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
         need(len(text.encode('utf-8')) <= MAX_PROMPT, f'запрос {len(text.encode())} байт > {MAX_PROMPT}: раздели задачу')
         need(not SECRET_RE.search(text), 'в запросе найдено похожее на секрет — в модель не отправлено')
         task.s['calls'][key] = {'unit': uid, 'role': role, 'kind': kind, 'n': n, 'prompt_sha256': sha(text),
-                                'prompt_bytes': len(text.encode()), 'at': time.time(), 'cause': call_cause(task, uid, role, n),
+                                'prompt_bytes': len(text.encode()), 'at': time.time(), 'cause': call_cause(task, uid, role, n, subject),
                                 **stamp({}), **(meta or {})}
     d.mkdir(parents=True, exist_ok=True)
     wtext(saved, text)
@@ -1487,8 +1494,13 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
     return result
 
 
-NOT_STARTED_RE = re.compile(r'\b429\b|rate.?limit|too many requests|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|connection (?:reset|refused|error)|'
-                            r'network (?:error|is unreachable)|getaddrinfo|stream disconnected before|503 service unavailable', re.I)
+# Повтор допустим, только когда генерации не было: сервер отклонил запрос по частоте (429 приходит после отправки, но до генерации) или
+# соединение не установлено (DNS, отказ в соединении, сеть недоступна). Обрыв установленного соединения (reset, stream disconnected, 5xx) и
+# таймаут ожидания ответа (в том числе первого байта) неотличимы от начатой генерации — неопределённый исход, повтора нет.
+NOT_STARTED_RE = re.compile(r'\b429\b|rate.?limit|too many requests|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|connection refused|'
+                            r'network is unreachable|getaddrinfo', re.I)
+AMBIGUOUS_RE = re.compile(r'ECONNRESET|connection (?:reset|closed|aborted)|stream disconnected|broken pipe|\b5\d\d\b|'
+                          r'timed? ?out|timeout|deadline exceeded', re.I)
 QUOTA_RE = re.compile(r'usage limit|quota|insufficient|billing', re.I)
 PRE_MODEL_EVENTS = ('thread.started', 'error')   # служебные события Codex до обращения к модели
 
@@ -1507,7 +1519,8 @@ def not_started(out_path, err_path):
             return False
         if not (isinstance(ev, dict) and ev.get('type') in PRE_MODEL_EVENTS):
             return False
-    return bool(NOT_STARTED_RE.search(err)) and not QUOTA_RE.search(err)
+    diag = err + '\n' + out   # признак квоты или обрыва в любом диагностическом канале (stderr или событие error в stdout) запрещает повтор
+    return bool(NOT_STARTED_RE.search(err)) and not QUOTA_RE.search(diag) and not AMBIGUOUS_RE.search(diag)
 
 
 def spawn(cmd, d, prompt, kind, cwd, env=None, stdout_to=None):
@@ -1569,8 +1582,13 @@ def launch_codex_review(effort):
 
 def parse_codex_json(text):
     """Структурированный вердикт Codex (та же схема, что у Claude-reviewer). Ответ не по схеме — не PASS: диагностика без повторного вызова."""
+    def unique(pairs):   # повторённый ключ ({"verdict":"FIX","verdict":"PASS"}) — противоречие, а не «последнее значение»
+        keys = [k for k, _ in pairs]
+        need(len(keys) == len(set(keys)), 'Codex-reviewer: повторяющийся ключ в JSON (' + ', '.join(sorted({k for k in keys if keys.count(k) > 1})) +
+             ') — ответ неоднозначен, UNCERTAIN, не PASS; вызов израсходован, автоповтор запрещён')
+        return dict(pairs)
     try:
-        res = json.loads(text)
+        res = json.loads(text, object_pairs_hook=unique)
     except ValueError:
         raise Blocked('Codex-reviewer вернул не JSON — UNCERTAIN, не PASS; вызов израсходован, автоповтор запрещён') from None
     ok = (isinstance(res, dict) and res.get('verdict') in ('PASS', 'FIX', 'UNCERTAIN') and isinstance(res.get('summary'), str)
@@ -3043,7 +3061,9 @@ def do_review(task, uid, effort, full, opts=None):
     # остальной запрос — прежний узкий контекст
     narrow = ['-U15' if fe else '-U3', f'{frm}..{tip}', '--', *pathspec(task, uid)]
     diff = git(root, 'diff', '--no-ext-diff', '-W', *narrow)
-    if len(diff) > MAX_DIFF or len(diff.encode('utf-8')) > MAX_PROMPT // 2:
+    # похожее на секрет только в расширенном контексте — тоже откат: иначе неизменённая строка функции блокировала бы ревью и восстановление,
+    # которые на узком diff (как в 1.4.0) проходят; узкий diff проверяется на секреты ниже, как и прежде
+    if len(diff) > MAX_DIFF or len(diff.encode('utf-8')) > MAX_PROMPT // 2 or SECRET_RE.search(diff):
         diff = git(root, 'diff', '--no-ext-diff', *narrow)
     need(diff, 'diff пуст после исключений')
     need(len(diff) <= MAX_DIFF, f'diff {len(diff)} символов > {MAX_DIFF}: раздели задачу')
@@ -3445,9 +3465,9 @@ def status_data(t):
 def report_lines(d):
     lines = [f'Расход цепочки {d["chain"]}: вызовов {d["calls_chain"]} (в этой задаче {d["calls_task"]}, перенесено {d["inherited_calls"]})' +
              (f', оценка {d["estimate"]}' if d['estimate'] else ', оценка не задана') + (f', предел Ивана {d["hard"]}' if d['hard'] else '')]
-    if d['over_estimate']:
+    if d['estimate'] and d['calls_chain'] > d['estimate']:   # по счётчику цепочки: превышение могли дать и предшествующие попытки --continues
         lines.append(f'ОЦЕНКА ПРЕВЫШЕНА на {d["calls_chain"] - d["estimate"]} (не лимит; новое согласование в пределах бюджета не нужно). Сверх оценки: ' +
-                     '; '.join(d['over_estimate']))
+                     ('; '.join(d['over_estimate']) or 'вызовы предшествующих попыток цепочки (подробности — в их записях журнала)'))
     for c in d['calls']:
         tok = c['tokens'] or {}
         lines.append(f'  {c["key"]} [{c["service"]}] причина: {CAUSE_RU.get(c["cause"], c["cause"])}; исход {c["outcome"]}' +
@@ -3502,9 +3522,8 @@ def cmd_status(a):
         say(line)
     d = status_data(t)
     if d['estimate']:
-        say(report_lines(d)[0])
-        if d['over_estimate']:
-            say(report_lines(d)[1])
+        for line in report_lines(d)[:2 if d['calls_chain'] > d['estimate'] else 1]:
+            say(line)
     return 0
 
 
@@ -3689,7 +3708,7 @@ def main(argv=None):
     except Blocked as e:
         print(f'{ {3: "LIMIT", 4: "BUSY", 5: "WAIT"}.get(e.code, "ERROR") }: {e}', file=sys.stderr)
         ref = {2: 'recovery.md', 3: 'budget.md'}.get(e.code)
-        if ref and (e.code == 3 or 'вызов' in str(e)):   # код 2 — только сбой вызова модели, не ошибка настройки   # справка читается тимлидом только при такой остановке, а не держится в контексте навыка
+        if ref and (e.code == 3 or re.search(r'вызов|ответ', str(e))):   # код 2 — только сбой вызова или ответа модели, не ошибка настройки   # справка читается тимлидом только при такой остановке, а не держится в контексте навыка
             print(f'Справка: {Path(__file__).resolve().parent / "reference" / ref}', file=sys.stderr)
         return e.code
     except (OSError, ValueError, subprocess.SubprocessError, KeyError, TypeError, AttributeError, IndexError) as e:

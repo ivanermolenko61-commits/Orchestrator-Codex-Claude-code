@@ -69,8 +69,8 @@
       "git_blob": "60d1b412a46d37040649119db4d24ee0f3bf76d9"
     },
     "README.md": {
-      "sha256": "99c4e0e6eb58e709d6837d5ebc61f0c174ec1e789730274796329bd238c39e34",
-      "git_blob": "0367ae11ed6842d6bc766bb84d4af766775767bb"
+      "sha256": "6eee92763a7d725bde7f90b486592531fe31351a784c8aae741520c4167da8da",
+      "git_blob": "cdf4828b40af1e9aedca386e07fa0296cfe62319"
     },
     "scripts/install-global.sh": {
       "sha256": "54947b4161b02c7e8bcf1889bec7d17d3f989c3ffe368ee9e193a6f76a6b1470",
@@ -85,8 +85,8 @@
       "git_blob": "f5683b1af358ca61e9600f4b4547af176ca18d38"
     },
     "skills/agentq/agentq_global.py": {
-      "sha256": "7122d4e4646613ddfbaa5502d22741dbe916e5837d3ac9f2fa542aed2f20db48",
-      "git_blob": "e4b44ff3e124a582def5bab13f8a6a5f0ca177d7"
+      "sha256": "bf5bc649d847b288b72aa69863255d824fec55928d67fe35e8b47f06c5c85bc2",
+      "git_blob": "179b1c6863f845d7a7379ef2e86ffed1734f4c00"
     },
     "skills/agentq/codex-review.sh": {
       "sha256": "c78dc298bb0520f6c4c76b60133b3628d715e1db9947ed4ccb2a245a49ae4a3e",
@@ -113,16 +113,16 @@
       "git_blob": "0753044699ab3f7c6cf6320585ed9f0535b0e111"
     },
     "skills/agentq/reference/recovery.md": {
-      "sha256": "de9253ae61483a41bce4143b81587420cd0e8e2b7adfc186d5737a12c9b71a3e",
-      "git_blob": "0ad1617e60c0094423ba33d2ba6fadb478c23c59"
+      "sha256": "f38ecace42687482d97e6196514aa1b7abc1751662ffbedf3441697162b90006",
+      "git_blob": "c6bb69e816b9628346f0359100d455119a6600e9"
     },
     "skills/agentq/selftest.py": {
-      "sha256": "54d3aa42e14d957f58db8dedb9302f915ab65be76da158c0b637caace0f5d4cb",
-      "git_blob": "0b97b9a9db46eb76b82459a147e826c848924823"
+      "sha256": "b61ad3fc9e211f997a8d68b7b8f7fdf5ef45b50008d69512761bb0e28fad17cf",
+      "git_blob": "bf9fa60ca1b3e9e0f4e4bb2f6ca9a18f4e3b9c0a"
     },
     "skills/agentq/SKILL.md": {
-      "sha256": "0cde7c27aabb7801f6ab8e5463cef8d167c25c71c58f4e0343d77ccca624619e",
-      "git_blob": "0294b50e3fcbc4c69237fb96f9121acd2cc05958"
+      "sha256": "633d734534c6575397e6f44e3672286e5f97cf70410cdafd5cafb10d6c8fc5b2",
+      "git_blob": "0f655950137e15d3be87ec3a52218fb99ad79d79"
     },
     "VERSION": {
       "sha256": "acb57a7135b2d7d6e665f67f056e21353023b93835f54def1ae523bf76f1bfb3",

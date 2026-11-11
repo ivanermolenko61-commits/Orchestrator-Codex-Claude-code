@@ -62,6 +62,12 @@ finally:
         f.write(f'{time.time()} end codex-{role}\n')
 if sc.get('fail') == 'transient':   # отказ до обращения к модели: только служебное событие и 429
     print(json.dumps({'type': 'thread.started'})); print('stream error: 429 Too Many Requests', file=sys.stderr); sys.exit(1)
+if sc.get('fail') == 'reset':   # обрыв установленного соединения: исход неопределён
+    print(json.dumps({'type': 'thread.started'})); print('stream disconnected before completion: ECONNRESET', file=sys.stderr); sys.exit(1)
+if sc.get('fail') == 'first-byte':   # таймаут ожидания первого байта рядом с 429: неотличим от обрыва
+    print(json.dumps({'type': 'thread.started'})); print('429 retry exhausted; timed out waiting for first byte', file=sys.stderr); sys.exit(1)
+if sc.get('fail') == 'quota-stdout':   # квота сообщена событием stdout, в stderr только 429
+    print(json.dumps({'type': 'error', 'message': 'usage limit reached'})); print('429 Too Many Requests', file=sys.stderr); sys.exit(1)
 if sc.get('fail'): print('usage limit reached (429)', file=sys.stderr); sys.exit(1)
 if sc.get('usage'):   # учёт токенов: события turn.completed, как у codex exec --json
     for u_ in sc['usage']:
@@ -3593,6 +3599,77 @@ def t_v15():
     h.script('codex', [{'fail': 'transient'}, {'fail': 'transient'}, {'text': 'VERDICT: PASS'}])
     rc, _, err = h.cr('review')
     check('1.5: повтор не больше одного: второй отказ — блокер', rc == 2 and h.count('codex-review') == 2, err)
+
+    # --- D2. приёмка 1.5 (B1/C1, C2): обрыв установленного соединения и квота в событии stdout — неопределённый исход, повтора нет
+    for label, fail in (('обрыв соединения (ECONNRESET) после отправки', 'reset'), ('квота в событии stdout при 429 в stderr', 'quota-stdout'),
+                        ('таймаут первого байта (рядом с 429)', 'first-byte')):
+        r = Proj('v15-r')
+        r.cr('start', 'обрыв', '--id', 'v15-r')
+        r.commit('backend/app.py', ADD2)
+        r.script('codex', [{'fail': fail}, {'text': 'VERDICT: PASS'}])
+        rc, _, err = r.cr('review')
+        check(f'1.5: {label} — повтора нет, блокер, один запуск', rc == 2 and r.count('codex-review') == 1, err)
+    # B2: повторяющийся ключ JSON
+    k = Proj('v15-k')
+    k.cr('start', 'дубль ключа', '--id', 'v15-k')
+    k.commit('backend/app.py', ADD2)
+    k.script('codex', [{'raw': '{"verdict":"FIX","verdict":"PASS","summary":"ok","findings":[],"prior":[]}'}])
+    rc, _, err = k.cr('review')
+    check('1.5: JSON с повторяющимся ключом verdict — не PASS, диагностика, один вызов',
+          rc == 2 and 'повторяющийся ключ' in err and k.count('codex-review') == 1 and rstate(k)['units']['main']['verdict'] is None, err)
+    # D1: похожее на секрет только в неизменённой строке функции (видно лишь в -W) — откат на узкий diff, ревью идёт
+    fake_key = 'AKIA' + 'Q' * 16   # собирается в тесте, чтобы исходник не содержал похожего на ключ литерала
+    sv0 = FUNC_V0.replace('    x = a\n', f'    x = a  # {fake_key}\n')   # 5 строк над изменением: вне -U3, внутри -W
+    w = Proj('v15-w')
+    w.commit('backend/app.py', sv0, 'base fn')
+    w.cr('start', 'секрет в контексте функции', '--id', 'v15-w')
+    w.commit('backend/app.py', sv0.replace('    return x + y\n', '    return x + y + 1\n'))
+    w.script('codex', [{'text': 'VERDICT: PASS'}])
+    rc, _, err = w.cr('review')
+    pw = codex_prompts(w)[0].read_text(encoding='utf-8') if codex_prompts(w) else ''
+    check('1.5: похожее на секрет только в расширенном контексте -W — откат на узкий diff, секрет в модель не отправлен',
+          rc == 0 and pw and fake_key not in pw, err)
+    # A1: после неоднозначного отчёта новый SHA — причина «новый кандидат», а не «повтор того же SHA»
+    u = Proj('v15-u')
+    u.cr('start', 'причина', '--id', 'v15-u')
+    u.commit('backend/app.py', ADD2)
+    u.script('codex', [FIX_T, {'text': 'VERDICT: PASS'}, {'text': '[ЗАКРЫТО F1] исправлено\nVERDICT: PASS'}])
+    u.cr('review')
+    u.commit('backend/app.py', ADD2.replace('+ 1', '+ 2'), 'fix1')
+    u.cr('review')   # PASS без статуса F1 — UNCERTAIN на этом SHA
+    integ = (rstate(u)['units']['main']['verdict'] or {}).get('integrity')
+    u.commit('backend/app.py', ADD2.replace('+ 1', '+ 3'), 'fix2')
+    u.cr('review')
+    causes = [c['cause'] for c in json.loads(u.cr('status', '--json')[1])['calls']]
+    check('1.5: после неоднозначного отчёта ревью нового SHA — причина new_candidate', integ and causes == ['first', 'new_candidate', 'new_candidate'], causes)
+    # A2: превышение оценки видно и в продолжении, где своих вызовов ещё нет
+    sa2 = a.cr('status')[1]
+    check('1.5: превышение оценки по счётчику цепочки показывается в продолжении без своих вызовов', 'ОЦЕНКА ПРЕВЫШЕНА на 1' in sa2, sa2)
+
+    # A3: вызов, оборванный после сохранения ответа и событий, восстанавливается без нового вызова, токены учитываются ровно один раз
+    #   до_end — обрыв до записи завершения этапа (end нет, токены только в recovered); после_end — end записан, receipt нет (токены в обоих)
+    for label, drop_end in (('обрыв до записи завершения этапа', True), ('обрыв после завершения этапа, до receipt', False)):
+        t3 = Proj('v15-t3')
+        t3.cr('start', 'восстановление и токены', '--id', 'v15-t3')
+        t3.commit('backend/app.py', ADD2)
+        t3.script('codex', [{'text': 'VERDICT: PASS', 'usage': [{'input_tokens': 500, 'cached_input_tokens': 200, 'output_tokens': 9}]},
+                            {'text': 'VERDICT: PASS'}])
+        t3.cr('review')
+        cdir = t3.repo / '.ai/task/calls/main-review-1'
+        (cdir / 'receipt.json').unlink()
+        tl = t3.repo / '.ai/task/timing/main.jsonl'
+        if drop_end:
+            keep = [l for l in tl.read_text(encoding='utf-8').splitlines()
+                    if not (json.loads(l).get('ev') == 'end' and json.loads(l).get('id') == 'main:review:1')]
+            tl.write_text('\n'.join(keep) + '\n', encoding='utf-8')
+        st3 = rstate(t3)
+        st3['units']['main']['verdict'] = None   # состояние до сохранения вердикта: обрыв случился раньше
+        st3['units']['main']['reviewed'] = None
+        (t3.repo / '.ai/task/state.json').write_text(json.dumps(st3), encoding='utf-8')
+        rc, _, err = t3.cr('review')
+        u3 = json.loads(t3.cr('status', '--json')[1])['usage']
+        check(f'1.5: {label} — восстановление без нового вызова, usage записан один раз',
+              rc == 0 and t3.count('codex-review') == 1 and u3 == {'review/codex': {'calls': 1, 'input': 500, 'cached': 200, 'output': 9}}, (rc, err, u3))
 
     # --- E2. события Codex-reviewer: рассуждение со словом fallback — содержимое; подмена модели и инструмент — отказ
     for label, evs, want in (('рассуждение со словом fallback принимается', [{'type': 'item.completed', 'item': {'type': 'reasoning', 'text': 'fallback на -U3'}}], 0),

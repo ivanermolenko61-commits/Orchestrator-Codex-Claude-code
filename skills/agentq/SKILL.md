@@ -32,7 +32,7 @@ disable-model-invocation: true
 ## Шаг 1. Постановка
 1. Нет задачи — `CR status`: есть активная — продолжай; нет — спроси. Не git — остановись. Ветка `main`/`master` — создай `aq/<коротко>`.
 2. Раздели по ролям: клиент (`frontend/`, `client/`, `web/`, `ui/`, `*.tsx|jsx|vue|svelte|css|html`) — Codex, сервер (`backend/`, `server/`, `api/`, `*.py`) — Claude; иначе маски `.agents/agentq.json`. Защищённые зоны — единица `protected`.
-3. Смешанная: контракт (поля, типы, ошибки, права, сбои) в файл ≤4000 символов → `CR start "<цель>" --kind mixed --contract-file F [--estimate N]` → `CR unit <uid> --kind backend|frontend|protected --files … [--context …] [--spec-file …]` (до 8 файлов, без пересечений; `--after <uid>` — зависимость). Контракт меняется только с новым ревью затронутых единиц.
+3. Смешанная: контракт (поля, типы, ошибки, права, сбои) в файл ≤4000 символов → `CR start "<цель>" --kind mixed --contract-file F [--estimate N]` → `CR unit <uid> --kind backend|frontend|protected --files … [--context …] [--spec-file …]` (до 8 файлов, без пересечений; `--after <uid>` — зависимость). Контракт меняется только с согласия обеих сторон и с новым ревью затронутых единиц.
 4. Серверная: `CR start "<цель>"` (единица `main`). Клиентская: `start --kind mixed` + краткий контракт + frontend-единица.
 5. `--estimate N` — начальная оценка обращений (не лимит, превышение показывает `CR report`). Бюджет — reference/budget.md.
 6. Независимые единицы — параллельно: `CR cycle fe` в фоне, пока ведёшь backend. Зависимой — `--after be` и `cycle fe --wait СЕК` (без `--wait` — код 5). Одна команда на единицу (иначе 4 BUSY).
