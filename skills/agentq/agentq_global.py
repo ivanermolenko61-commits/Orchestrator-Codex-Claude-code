@@ -1865,6 +1865,9 @@ def round_commit(root, u, label, d, expected):
     base, recorded, res_dir = rjson(d / 'base.json'), rjson(d / 'result.json'), d / 'result'
     expected = {f for f in u['files'] if f in recorded and recorded[f] != base['unit'].get(f)}
     need(set(names) == expected, f'коммит {found[:10]} затрагивает не тот набор файлов, что сохранённый результат автора (хеши результата) — восстановление отказано')
+    for ln in git(root, 'diff-tree', '--no-commit-id', '--raw', '--no-renames', '-r', found).splitlines():
+        om, nm = ln.lstrip(':').split(' ')[:2]
+        need(om == nm or (om == '000000' and nm == '100644'), f'коммит {found[:10]} меняет режим файла ({om}→{nm}) — восстановление отказано, решает тимлид')
     for x in names:
         want = (res_dir / x).read_bytes()
         need(sha(want) == recorded[x], f'{x}: сохранённый результат автора изменён после записи (хеши результата) — восстановление отказано')
@@ -1882,6 +1885,21 @@ def index_blob(root, x):
 
 def lf(raw):
     return raw.replace(b'\r\n', b'\n')
+
+
+def mode_drift(wt, paths):
+    """Пути, у которых режим файла (100644/100755/ссылка) в индексе или в рабочем файле копии агента отличается от HEAD: такую правку
+    (например, chmod +x, положенный в индекс вручную) git add молча перезаписал бы. Новый файл допустим только с обычным режимом 100644."""
+    bad = set()
+    for args in (['diff-index', '--cached', '--raw', '-z', '--no-renames', 'HEAD'], ['diff-files', '--raw', '-z']):
+        r = subprocess.run(['git', '-c', 'core.fsmonitor=false', '-C', str(wt), *args, '--', *paths], capture_output=True, timeout=120, env=clean_env())
+        need(r.returncode == 0, 'git ' + args[0] + ' рабочей копии автора не удался: ' + r.stderr.decode('utf-8', 'replace')[:200])
+        f = r.stdout.decode('utf-8', 'replace').split('\0')
+        for meta, path in zip(f[0::2], f[1::2]):
+            old, new = meta.lstrip(':').split(' ')[:2]
+            if (old != '000000' and new != '000000' and old != new) or (old == '000000' and new not in ('000000', '100644')):
+                bad.add(path)
+    return sorted(bad)
 
 
 def worktree_dirty(wt):
@@ -2011,6 +2029,8 @@ def do_claude_author(task, uid, opts, note):
         need(cur in ok, f'{x}: рабочая копия автора изменена вне агента (не исходное содержимое и не результат автора, хеши результата) — коммита нет')
         idx = index_blob(wt, x)
         need((sha(lf(idx)) if idx is not None else None) in ok, f'{x}: индекс рабочей копии автора изменён вне агента (хеши результата) — коммита нет')
+    drift = mode_drift(wt, changed)
+    need(not drift, 'режим файла в рабочей копии автора изменён вне агента: ' + ', '.join(drift[:5]) + ' — коммита нет, результат автора сохранён в ' + str(res_dir))
     for x in changed:   # перенос результата в рабочую копию агента доверенным кодом (идемпотентно)
         p = wt / x
         if not (p.is_file() and sha(lf(p.read_bytes())) in (recorded[x], sha(lf((res_dir / x).read_bytes())))):

@@ -3395,6 +3395,29 @@ def t_claude_author():
     check('чужая версия в индексе рабочей копии агента при файле, равном результату: отказ, коммита нет, Claude заново не вызывался',
           rc == 2 and 'индекс рабочей копии автора' in err and wg(xi, 'rev-parse', 'HEAD') == h1 and len(ca(xi)) == 1, err)
 
+    # обрыв между add и commit, затем в индексе рабочей копии агента вручную изменён только режим файла (chmod +x): git add его потерял бы
+    xm = mixed_proj('ca-wt-mode')
+    xm.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    xm.cr('author-claude', 'be', '--task-file', note(xm))
+    wg(xm, 'reset', '--soft', '-q', 'HEAD~1')
+    wg(xm, 'update-index', '--chmod=+x', 'backend/app.py')
+    lost(xm)
+    h1 = wg(xm, 'rev-parse', 'HEAD')
+    rc, _, err = xm.cr('author-claude', 'be', '--task-file', note(xm))
+    check('режим файла в индексе рабочей копии агента изменён вне агента: отказ, режим 100755 в индексе сохранён, коммита нет, Claude заново не вызывался',
+          rc == 2 and 'режим файла' in err and wg(xm, 'rev-parse', 'HEAD') == h1 and wg(xm, 'ls-files', '-s', 'backend/app.py').startswith('100755')
+          and len(ca(xm)) == 1, err)
+    # коммит раунда переписан с тем же содержимым, меткой и автором, но со сменой режима — восстановление его не принимает
+    xa = mixed_proj('ca-mode-amend')
+    xa.script('claude', [{'edit': {'backend/app.py': APP_C}}])
+    xa.cr('author-claude', 'be', '--task-file', note(xa))
+    wg(xa, 'update-index', '--chmod=+x', 'backend/app.py')
+    wg(xa, '-c', 'user.name=agent-claude', '-c', 'user.email=agent-claude@users.noreply.local', 'commit', '-q', '--amend', '--no-edit')
+    lost(xa)
+    rc, _, err = xa.cr('author-claude', 'be', '--task-file', note(xa))
+    check('восстановление: коммит раунда со сменой режима файла не принимается, Claude заново не вызывался',
+          rc == 2 and 'режим файла' in err and rstate(xa)['units']['be']['candidate'] is None and len(ca(xa)) == 1, err)
+
     # --- cycle для backend: автор Claude → проверки → ревью Codex → исправление, профиль по политике, затем integrate; зависимость --after
     cy = mixed_proj('ca-cycle')
     cy.cr('unit', 'b2', '--kind', 'backend', '--files', 'backend/b2.py', '--after', 'be')
