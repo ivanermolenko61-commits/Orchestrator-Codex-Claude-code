@@ -110,6 +110,8 @@ else:   # автор: правки файлов в рабочем каталог
         Path(p_).write_text(c_, encoding='utf-8', newline='')
         __import__('subprocess').run(['git', 'add', p_], check=True)
     out = {'is_error': False, 'subtype': sc.get('subtype', 'success'), 'result': sc.get('text', 'готово')}
+    if sc.get('exit'):   # процесс завершился ошибкой после правок
+        sys.exit(sc['exit'])
 mname = json.loads((d / 'claude_model.json').read_text()) if (d / 'claude_model.json').exists() else 'claude-%s-5-5' % a[a.index('--model') + 1]
 out['modelUsage'] = {m_: {'inputTokens': 11, 'outputTokens': 22, 'cacheReadInputTokens': 0, 'cacheCreationInputTokens': 33}
                      for m_ in (mname if isinstance(mname, list) else [mname])}
@@ -3198,6 +3200,17 @@ def t_claude_author():
     check('обрыв после процесса: повтор снимает результат с сохранённой копии и коммитит кандидата без нового вызова Claude; копия удалена',
           rc == 0 and len(ca(i2)) == 1 and 'aq:ca-interrupt/be/a1' in wg(i2, 'log', '-1', '--format=%s') and (cd2 / 'result.json').is_file()
           and (cd2 / 'receipt.json').is_file() and not work2.exists() and wg(i2, 'show', 'HEAD:backend/app.py') == APP_C.strip() and head(i2) == h2, out + err)
+
+    # процесс автора завершился ошибкой после правок: оплаченные правки сохранены в каталоге вызова, не применены, повторного вызова нет
+    fl = mixed_proj('ca-fail')
+    fl.script('claude', [{'edit': {'backend/app.py': APP_C}, 'exit': 1}])
+    rc, out, err = fl.cr('author-claude', 'be', '--task-file', note(fl))
+    fd = fl.repo / '.ai/task/calls/be-author-1'
+    rc2, _, err2 = fl.cr('author-claude', 'be', '--task-file', note(fl))
+    check('процесс автора упал после правок: правки сохранены в failed-result (байты и хеши), кандидата нет, временная копия удалена, повтор без вызова Claude',
+          rc == 2 and 'failed-result' in err and (fd / 'failed-result/backend/app.py').is_file() and (fd / 'failed-result/backend/app.py').read_text(encoding='utf-8') == APP_C
+          and (fd / 'failed-result.json').is_file() and not cand(fl) and not (fd / 'result.json').exists()
+          and not Path(json.loads((fd / 'work.json').read_text(encoding='utf-8'))['work']).exists() and rc2 != 0 and len(ca(fl)) == 1, f'{rc} {err} {rc2} {err2}')
 
     # изменение вне списка файлов
     o = mixed_proj('ca-out')

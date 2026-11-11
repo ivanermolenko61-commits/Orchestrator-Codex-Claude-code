@@ -1794,11 +1794,28 @@ def launch_claude_author(profile, seed, files, context_files):
                '--max-turns', '15', '--system-prompt', CLAUDE_AUTHOR_SYSTEM]
         try:
             out = spawn(cmd, d, prompt, 'claude-author', work, stdout_to='stdout.json')
-        except Blocked:   # процесс не завершился успешно (таймаут, прерывание, код ≠ 0): результата нет, копия не нужна
-            shutil.rmtree(work, ignore_errors=True)
-            raise
+        except Blocked as e:   # процесс не завершился успешно (таймаут, прерывание, код ≠ 0): результат не применяется, но оплаченные правки не теряются
+            raise Blocked(f'{e} {save_failed_author(d, work)}', e.code) from None
         capture_author_result(d, work, out)   # копия удаляется внутри, только после записи результата, его хешей и ответа
     return go
+
+
+def save_failed_author(d, work):
+    """Неуспешный процесс автора: правки из временной копии сохраняются в failed-result/ каталога вызова (с хешами) для разбора тимлидом и
+    НЕ применяются; копия удаляется только после сохранения, при ошибке записи остаётся на месте."""
+    try:
+        got = workspace_files(work)
+        snap = d / 'failed-result'
+        shutil.rmtree(snap, ignore_errors=True)
+        for x, raw in got.items():
+            f = snap / x
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(raw)
+        wjson(d / 'failed-result.json', {x: sha(raw) for x, raw in got.items()})
+    except OSError as err:
+        return f'Правки автора не сохранены ({err}); временная копия оставлена: {work}'
+    shutil.rmtree(work, ignore_errors=True)
+    return f'Правки автора (не применены) сохранены для разбора: {snap}'
 
 
 def capture_author_result(d, work, out):
