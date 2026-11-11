@@ -1205,7 +1205,7 @@ def codex_usage(path):
 def timing_summary(task):
     """Сводка по журналам времени единиц. Длительность берётся только из завершённых этапов (одно завершение на этап: повторное чтение
     receipt и повтор записи не удваивают); этапы без завершения — «неизвестно» или «в работе», а не ноль."""
-    runs, recovered = {}, set()
+    runs, recovered, noid = {}, set(), []
     d = task.dir / 'timing'
     for p in sorted(d.glob('*.jsonl')) if d.is_dir() else []:
         try:
@@ -1216,6 +1216,9 @@ def timing_summary(task):
             try:
                 e = json.loads(line)
             except ValueError:
+                continue
+            if isinstance(e, dict) and not isinstance(e.get('id'), str) and e.get('ev') == 'end' and e.get('tokens'):
+                noid.append(e)   # запись без ID вызова (журнал прежней версии): ключа для дедупликации нет — считается по одной
                 continue
             if not isinstance(e, dict) or not isinstance(e.get('id'), str):
                 continue
@@ -1240,23 +1243,29 @@ def timing_summary(task):
             s['sec'] += e['duration_s']
             s['resp'] += e.get('response_bytes') or 0
             spans.append((e['wall'] - e['duration_s'], e['wall']))
-            if e.get('tokens'):
-                tokens.append(e['tokens'])
-                add_usage(usage, (e or b).get('stage'), service_of((b or {}).get('kind') or (e or {}).get('kind')), e['tokens'])
         elif b and is_int(b.get('pid'), 1) and pid_alive(b['pid']):
             s['running'] += 1
         else:
             s['unknown'] += 1
-    for r in runs.values():
-        rt = r.get('rtok')
-        if rt and not (r.get('end') or {}).get('tokens'):
-            add_usage(usage, rt.get('stage'), service_of(rt.get('kind') or (r.get('start') or {}).get('kind')), rt['tokens'])
+    # ЕДИНСТВЕННОЕ место, где токены из журнала складываются: по одному набору на ID вызова (токены завершения этапа, а если их нет — токены
+    # события восстановления); из него же status --json, report, finish и строка «Токены по данным CLI». Записи без ID — по одной.
+    per_call = {}
+    for k, r in runs.items():
+        src = r['end'] if (r.get('end') or {}).get('tokens') else r.get('rtok')
+        if src and src.get('tokens'):
+            per_call[k] = {'stage': src.get('stage') or (r.get('start') or {}).get('stage'),
+                           'service': service_of(src.get('kind') or (r.get('start') or {}).get('kind')), 'tokens': src['tokens']}
+    for i, e in enumerate(noid):
+        per_call[f'noid:{i}'] = {'stage': e.get('stage'), 'service': service_of(e.get('kind')), 'tokens': e['tokens']}
+    for v in per_call.values():
+        tokens.append(v['tokens'])
+        add_usage(usage, v['stage'], v['service'], v['tokens'])
     for key, c in task.s['calls'].items():   # вызовы без записей времени (состояние прежней версии)
         if key not in runs and c.get('role') in stages:
             stages[c['role']]['unknown'] += 1
     total = sum(s['sec'] for s in stages.values())
     span = (max(b for _, b in spans) - min(a for a, _ in spans)) if spans else 0.0
-    return {'stages': stages, 'total': total, 'span': span, 'recovered': len(recovered), 'tokens': tokens, 'usage': usage,
+    return {'stages': stages, 'total': total, 'span': span, 'recovered': len(recovered), 'tokens': tokens, 'usage': usage, 'per_call': per_call,
             'measured_calls': sum(stages[k]['n'] for k in ('author', 'review'))}
 
 
@@ -1391,6 +1400,17 @@ def call_cause(task, uid, role, n, subject=None):
     return 'new_candidate' if v.get('sha') else 'unknown'
 
 
+def saved_tokens(kind, d, raw):
+    """Токены вызова из его сохранённых данных (events.jsonl Codex, ответ Claude) — для восстановления без нового вызова. В сводке timing_summary
+    учитываются один раз на ID вызова и только если у завершения этапа токенов нет, поэтому повторные восстановления их не удваивают."""
+    if kind in CODEX_KINDS:
+        return codex_usage(d / 'events.jsonl')
+    try:
+        return usage_tokens(kind, raw.read_text(encoding='utf-8')) if raw.exists() else None
+    except OSError:
+        return None
+
+
 def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None, legacy_ok=None):
     """Единственный путь к модели. Резерв бюджета сохраняется ДО запуска и не возвращается.
     receipt привязан к точному тексту запроса; готовый ответ после сбоя читается без нового вызова.
@@ -1429,7 +1449,8 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
             pass   # receipt прежней версии: точный сохранённый запрос относится к тому же снимку — результат читается без нового вызова
         else:
             need(r['binding'] == sha(kind + '\0' + build()[0]), f'{key}: запрос изменился после сохранённого ответа (binding mismatch) — вызов не повторяется')
-        tlog(task, uid, ev='recovered', stage=role, id=key, source='receipt')
+        rtok = saved_tokens(kind, d, raw)   # обрыв после receipt, но до записи токенов: расход берётся из сохранённых данных вызова
+        tlog(task, uid, ev='recovered', stage=role, id=key, source='receipt', kind=kind, **({'tokens': rtok} if rtok else {}))
         return r['result']
     if key in task.s['calls']:
         guard()
@@ -1448,9 +1469,9 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
             need(not pid_alive(rjson(pj)['pid']), f'BUSY: вызов {key} ещё выполняется', 4)
         need(raw.exists(), f'{key}: вызов начат, но ответа нет (сбой/таймаут/неопределённый исход) — автоматический повтор запрещён, см. {d}')
         result = parser(raw.read_text(encoding='utf-8'))
-        wjson(rec, stamp({'binding': sha(kind + '\0' + text), 'result': result}))
-        rtok = codex_usage(d / 'events.jsonl') if kind in CODEX_KINDS else usage_tokens(kind, raw.read_text(encoding='utf-8'))
+        rtok = saved_tokens(kind, d, raw)   # событие с токенами — ДО receipt: обрыв между ними не теряет расход
         tlog(task, uid, ev='recovered', stage=role, id=key, source='raw', kind=kind, **({'tokens': rtok} if rtok else {}))
+        wjson(rec, stamp({'binding': sha(kind + '\0' + text), 'result': result}))
         return result
     text, meta = build()   # до резерва: недопустимый контекст останавливает вызов без расхода
     # Параллельные единицы делят общий бюджет: свежее состояние, проверка предела и резерв — одна транзакция под блокировкой, иначе два
@@ -3449,7 +3470,7 @@ def status_data(t):
         done = (t.dir / 'calls' / k.replace(':', '-') / 'receipt.json').exists()
         calls.append({'key': k, 'unit': c.get('unit'), 'role': c.get('role'), 'kind': c.get('kind'), 'service': service_of(c.get('kind')),
                       'cause': c.get('cause', 'unknown'), 'outcome': 'ok' if done else (e.get('outcome') or 'unknown'),
-                      'duration_s': e.get('duration_s'), 'tokens': e.get('tokens')})
+                      'duration_s': e.get('duration_s'), 'tokens': (ts['per_call'].get(k) or {}).get('tokens')})
     units = {k: {'kind': u['kind'], 'status': u['status'], 'author_calls': t.spent(k, 'author'), 'review_calls': t.spent(k, 'review'),
                  'rounds': [{'sha': (r.get('sha') or '')[:10], 'progress': r.get('progress'), 'why': r.get('why')} for r in u['rounds']],
                  'findings': {st: sum(1 for f in u['findings'].values() if f['status'] == st) for st in ('open', 'closed', 'withdrawn')},

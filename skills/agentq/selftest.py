@@ -3648,7 +3648,9 @@ def t_v15():
 
     # A3: вызов, оборванный после сохранения ответа и событий, восстанавливается без нового вызова, токены учитываются ровно один раз
     #   до_end — обрыв до записи завершения этапа (end нет, токены только в recovered); после_end — end записан, receipt нет (токены в обоих)
-    for label, drop_end in (('обрыв до записи завершения этапа', True), ('обрыв после завершения этапа, до receipt', False)):
+    #   receipt_без_токенов — receipt записан, а ни end, ни события с токенами нет (обрыв между receipt и записью токенов, замечание A3 второго круга)
+    for label, drop_end, drop_receipt in (('обрыв до записи завершения этапа', True, True), ('обрыв после завершения этапа, до receipt', False, True),
+                                          ('receipt записан, токены — нет (ни end, ни recovered)', True, False)):
         t3 = Proj('v15-t3')
         t3.cr('start', 'восстановление и токены', '--id', 'v15-t3')
         t3.commit('backend/app.py', ADD2)
@@ -3656,7 +3658,8 @@ def t_v15():
                             {'text': 'VERDICT: PASS'}])
         t3.cr('review')
         cdir = t3.repo / '.ai/task/calls/main-review-1'
-        (cdir / 'receipt.json').unlink()
+        if drop_receipt:
+            (cdir / 'receipt.json').unlink()
         tl = t3.repo / '.ai/task/timing/main.jsonl'
         if drop_end:
             keep = [l for l in tl.read_text(encoding='utf-8').splitlines()
@@ -3665,11 +3668,38 @@ def t_v15():
         st3 = rstate(t3)
         st3['units']['main']['verdict'] = None   # состояние до сохранения вердикта: обрыв случился раньше
         st3['units']['main']['reviewed'] = None
+        st3['units']['main']['review_applied'] = 0   # вердикт и номер применённого ревью пишутся одной записью — до обрыва её не было
         (t3.repo / '.ai/task/state.json').write_text(json.dumps(st3), encoding='utf-8')
         rc, _, err = t3.cr('review')
         u3 = json.loads(t3.cr('status', '--json')[1])['usage']
         check(f'1.5: {label} — восстановление без нового вызова, usage записан один раз',
               rc == 0 and t3.count('codex-review') == 1 and u3 == {'review/codex': {'calls': 1, 'input': 500, 'cached': 200, 'output': 9}}, (rc, err, u3))
+
+    # Дедупликация токенов во ВСЕХ потребителях журнала: дубли записей одного ID (end, recovered) не удваивают расход ни в status --json, ни в
+    # report, ни в строке сводки status, ни в журнале finish; запись прежней версии без ID вызова читается без падения и считается по одной
+    dd = Proj('v15-dd')
+    dd.cr('start', 'дедупликация', '--id', 'v15-dd')
+    dd.commit('backend/app.py', ADD2)
+    dd.script('codex', [{'text': 'VERDICT: PASS', 'usage': [{'input_tokens': 500, 'cached_input_tokens': 200, 'output_tokens': 9}]}])
+    dd.cr('review')
+    tl = dd.repo / '.ai/task/timing/main.jsonl'
+    lines = tl.read_text(encoding='utf-8').splitlines()
+    end1 = next(l for l in lines if json.loads(l).get('ev') == 'end' and json.loads(l).get('id') == 'main:review:1')
+    rec1 = json.dumps({'wall': 1.0, 'ev': 'recovered', 'stage': 'review', 'id': 'main:review:1', 'source': 'receipt', 'kind': 'codex-review',
+                       'tokens': {'input_tokens': 500, 'cache_read_input_tokens': 200, 'output_tokens': 9}})
+    old = json.dumps({'wall': 2.0, 'ev': 'end', 'stage': 'review', 'duration_s': 1.0, 'tokens': {'input_tokens': 7, 'output_tokens': 3}})   # без id
+    tl.write_text('\n'.join(lines + [end1, rec1, rec1, old]) + '\n', encoding='utf-8')
+    exp = {'review/codex': {'calls': 1, 'input': 500, 'cached': 200, 'output': 9}, 'review/unknown': {'calls': 1, 'input': 7, 'cached': 0, 'output': 3}}
+    sj = json.loads(dd.cr('status', '--json')[1])
+    rep_ = dd.cr('report')[1]
+    st_ = dd.cr('status')[1]
+    dd.commit('backend/app.py', ADD2.replace('+ 1', '+ 5'), 'после PASS')
+    dd.cr('finish', '--abandon')
+    led_ = rledger(dd)[-1]['usage']
+    check('1.5: токены не удваиваются ни в одном потребителе журнала (status --json, report, status, finish); запись без ID читается и считается по одной',
+          sj['usage'] == exp and led_ == exp and 'вход 500 (из кэша 200), выход 9, вызовов с данными 1' in rep_ and 'вход 500 (кэш 200), выход 9' in rep_
+          and rep_.count('вход 500') == 2 and 'вход 500 (из кэша 200), выход 9, вызовов с данными 1' in st_ and 'вход 1000' not in rep_ + st_,
+          (sj['usage'], led_, rep_, st_))
 
     # --- E2. события Codex-reviewer: рассуждение со словом fallback — содержимое; подмена модели и инструмент — отказ
     for label, evs, want in (('рассуждение со словом fallback принимается', [{'type': 'item.completed', 'item': {'type': 'reasoning', 'text': 'fallback на -U3'}}], 0),
