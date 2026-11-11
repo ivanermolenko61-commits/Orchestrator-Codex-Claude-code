@@ -56,6 +56,7 @@ sync_tree "$REPO/global/workflow" "$DEST/workflow"
 sync_tree "$REPO/global/scripts"  "$DEST/scripts"
 sync_file "$REPO/global/CLAUDE.md" "$DEST/CLAUDE.md"
 for f in SKILL.md agentq_global.py codex-review.sh selftest.py; do sync_file "$REPO/skills/agentq/$f" "$DEST/skills/agentq/$f"; done
+sync_tree "$REPO/skills/agentq/reference" "$DEST/skills/agentq/reference"   # справка навыка: читается по ссылке из SKILL.md и сообщений движка
 sync_file "$REPO/VERSION" "$INST_VER_FILE"
 if [ "$diffs" -eq 0 ]; then echo "Установленные копии совпадают с репозиторием."; exit 0; fi
 if [ "$APPLY" = 1 ]; then echo "Обновлено файлов: $diffs (резервные копии: $BK). Новая сессия Claude Code нужна для agents/*.md, CLAUDE.md и SKILL.md."; exit 0; fi

@@ -81,6 +81,8 @@ REREVIEW_BLOCK = ('СТАТУС ПРЕЖНИХ ЗАМЕЧАНИЙ: для КАЖ
 MAX_DIFF = 60000
 MAX_PROMPT = 90000
 MAX_RESULT = 90000
+VERBOSE = False   # --verbose: полный текст отчёта ревью в выводе команды
+RETRY_PAUSE = int(os.environ.get('AGENTQ_RETRY_PAUSE', '20'))   # пауза перед единственным повтором не начавшегося вызова
 MAX_FILE = 40000
 MAX_UNIT_FILES = 8
 TIMEOUTS = {'codex-review': 900, 'codex-author': 600, 'claude-review': 600, 'claude-author': 900, 'checks': 600}
@@ -1173,6 +1175,33 @@ def usage_tokens(kind, text):
     return out if 'input_tokens' in out and 'output_tokens' in out else None
 
 
+CODEX_KINDS = ('codex-review', 'codex-author')
+
+
+def codex_usage(path):
+    """Токены Codex — из машинного вывода `codex exec --json` (события turn.completed.usage), суммой по ходам. Ключи приводятся к именам Claude
+    (cached_input_tokens → cache_read_input_tokens), чтобы сводка складывала оба сервиса. Нет файла или событий usage — None (неизвестно, не ноль)."""
+    try:
+        lines = Path(path).read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return None
+    tot, seen = {}, False
+    for line in lines:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        u = ev.get('usage') if isinstance(ev, dict) and ev.get('type') == 'turn.completed' else None
+        if not isinstance(u, dict):
+            continue
+        for src, dst in (('input_tokens', 'input_tokens'), ('cached_input_tokens', 'cache_read_input_tokens'), ('output_tokens', 'output_tokens'),
+                         ('reasoning_output_tokens', 'reasoning_output_tokens')):
+            if is_int(u.get(src)):
+                tot[dst] = tot.get(dst, 0) + u[src]
+                seen = True
+    return tot if seen and 'input_tokens' in tot and 'output_tokens' in tot else None
+
+
 def timing_summary(task):
     """Сводка по журналам времени единиц. Длительность берётся только из завершённых этапов (одно завершение на этап: повторное чтение
     receipt и повтор записи не удваивают); этапы без завершения — «неизвестно» или «в работе», а не ноль."""
@@ -1197,7 +1226,7 @@ def timing_summary(task):
             elif e.get('ev') == 'recovered':
                 recovered.add(e['id'])
     stages = {s: {'n': 0, 'sec': 0.0, 'unknown': 0, 'running': 0, 'req': 0, 'resp': 0} for s in ('author', 'review', 'checks', 'wait')}
-    spans, tokens = [], []
+    spans, tokens, usage = [], [], {}
     for r in runs.values():
         b, e = r.get('start'), r.get('end')
         s = stages.get((e or b or {}).get('stage'))
@@ -1211,6 +1240,7 @@ def timing_summary(task):
             spans.append((e['wall'] - e['duration_s'], e['wall']))
             if e.get('tokens'):
                 tokens.append(e['tokens'])
+                add_usage(usage, (e or b).get('stage'), service_of((b or {}).get('kind') or (e or {}).get('kind')), e['tokens'])
         elif b and is_int(b.get('pid'), 1) and pid_alive(b['pid']):
             s['running'] += 1
         else:
@@ -1220,8 +1250,27 @@ def timing_summary(task):
             stages[c['role']]['unknown'] += 1
     total = sum(s['sec'] for s in stages.values())
     span = (max(b for _, b in spans) - min(a for a, _ in spans)) if spans else 0.0
-    return {'stages': stages, 'total': total, 'span': span, 'recovered': len(recovered), 'tokens': tokens,
+    return {'stages': stages, 'total': total, 'span': span, 'recovered': len(recovered), 'tokens': tokens, 'usage': usage,
             'measured_calls': sum(stages[k]['n'] for k in ('author', 'review'))}
+
+
+def usage_text(usage):
+    return '; '.join(f'{k}: вход {v["input"]} (из кэша {v["cached"]}), выход {v["output"]}, вызовов с данными {v["calls"]}'
+                     for k, v in sorted(usage.items()))
+
+
+def service_of(kind):
+    return 'codex' if str(kind or '').startswith('codex') else 'claude' if str(kind or '').startswith('claude') else 'unknown'
+
+
+def add_usage(acc, role, service, tok):
+    """acc[роль/сервис] += токены одного вызова (вход, кэш, выход, число вызовов с данными)."""
+    r = acc.setdefault(f'{role}/{service}', {'calls': 0, 'input': 0, 'cached': 0, 'output': 0})
+    r['calls'] += tok.get('calls', 1)
+    r['input'] += tok.get('input_tokens', tok.get('input', 0))
+    r['cached'] += tok.get('cache_read_input_tokens', tok.get('cached', 0))
+    r['output'] += tok.get('output_tokens', tok.get('output', 0))
+    return acc
 
 
 def timing_lines(task):
@@ -1244,6 +1293,11 @@ def timing_lines(task):
     lines.append(f'Объём (байты, не токены): запросы {req}, ответы {resp}. ' + (
         f'Токены по данным CLI: вход {sum(t["input_tokens"] for t in s["tokens"])}, выход {sum(t["output_tokens"] for t in s["tokens"])} '
         f'(вызовов с данными: {len(s["tokens"])} из {s["measured_calls"]}).' if s['tokens'] else 'Токены: CLI их не сообщил.'))
+    if s['usage']:
+        lines.append('Токены по ролям и сервисам (эта задача): ' + usage_text(s['usage']))
+    inh = (task.s.get('inherited') or {}).get('usage')
+    if inh:
+        lines.append('Токены, перенесённые по цепочке --continues: ' + usage_text(inh))
     lines.append('Не измеряется: работа тимлида между командами, подготовка запросов, git-операции, ожидание решений Ивана.')
     return lines
 
@@ -1303,6 +1357,32 @@ def pid_alive(pid):
         return True
     except OSError:
         return False
+
+
+CAUSE_RU = {'first': 'первый', 'continues': 'продолжение цепочки', 'cli_failure': 'после сбоя прошлого вызова', 'red_checks': 'красные проверки',
+            'review_fix': 'замечания ревью (FIX)', 'integrity': 'неоднозначный отчёт (повтор того же SHA)', 'new_candidate': 'новый кандидат',
+            'unknown': 'неизвестно'}
+
+
+def call_cause(task, uid, role, n):
+    """Причина вызова — только по фактам состояния на момент резерва (без модели): прошлый вызов той же роли без receipt — сбой CLI; автор после
+    красных проверок кандидата или вердикта не-PASS; ревью после неоднозначного отчёта или нового кандидата. Не подтверждается — unknown."""
+    u = task.unit(uid)
+    prev = sorted((c['n'] for c in task.s['calls'].values() if c.get('unit') == uid and c.get('role') == role and is_int(c.get('n')) and c['n'] < n))
+    if not prev:
+        return 'continues' if task.spent(uid, role) > task.count(uid, role) else 'first'
+    if not (task.dir / 'calls' / f'{uid}-{role}-{prev[-1]}' / 'receipt.json').exists():
+        return 'cli_failure'
+    v, c, cand = u.get('verdict') or {}, u.get('checks') or {}, u.get('candidate')
+    if role == 'author':
+        if cand and c.get('sha') == cand and c.get('ok') is False:
+            return 'red_checks'
+        if v.get('value') in ('FIX', 'UNCERTAIN'):
+            return 'review_fix'
+        return 'unknown'
+    if v.get('integrity'):
+        return 'integrity'
+    return 'new_candidate' if v.get('sha') else 'unknown'
 
 
 def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None, legacy_ok=None):
@@ -1376,7 +1456,8 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
         need(len(text.encode('utf-8')) <= MAX_PROMPT, f'запрос {len(text.encode())} байт > {MAX_PROMPT}: раздели задачу')
         need(not SECRET_RE.search(text), 'в запросе найдено похожее на секрет — в модель не отправлено')
         task.s['calls'][key] = {'unit': uid, 'role': role, 'kind': kind, 'n': n, 'prompt_sha256': sha(text),
-                                'prompt_bytes': len(text.encode()), 'at': time.time(), **stamp({}), **(meta or {})}
+                                'prompt_bytes': len(text.encode()), 'at': time.time(), 'cause': call_cause(task, uid, role, n),
+                                **stamp({}), **(meta or {})}
     d.mkdir(parents=True, exist_ok=True)
     wtext(saved, text)
     with timed(task, uid, role, key, kind=kind, prompt_bytes=len(text.encode('utf-8'))) as tm:
@@ -1389,6 +1470,10 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
         finally:
             if raw.exists():
                 tm['response_bytes'] = raw.stat().st_size
+            if kind in CODEX_KINDS:   # расход Codex учитывается и у неудачного вызова: события пишутся до сбоя
+                ctok = codex_usage(d / 'events.jsonl')
+                if ctok:
+                    tm['tokens'] = ctok
         if raw.exists():
             tok = usage_tokens(kind, raw.read_text(encoding='utf-8'))
             if tok:
@@ -1402,21 +1487,52 @@ def model_call(task, uid, role, n, kind, prompt, launcher, parser, subject=None,
     return result
 
 
+NOT_STARTED_RE = re.compile(r'\b429\b|rate.?limit|too many requests|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|connection (?:reset|refused|error)|'
+                            r'network (?:error|is unreachable)|getaddrinfo|stream disconnected before|503 service unavailable', re.I)
+QUOTA_RE = re.compile(r'usage limit|quota|insufficient|billing', re.I)
+PRE_MODEL_EVENTS = ('thread.started', 'error')   # служебные события Codex до обращения к модели
+
+
+def not_started(out_path, err_path):
+    """Вызов достоверно не начался: в выводе нет ничего, кроме служебных событий до обращения к модели, а stderr — временный отказ (429/сеть)
+    без признаков исчерпанной квоты. Неопределённый исход (любой другой вывод, пустой stderr, другой текст ошибки) таким не считается."""
+    out = out_path.read_text(encoding='utf-8', errors='replace') if out_path.exists() else ''
+    err = err_path.read_text(encoding='utf-8', errors='replace') if err_path.exists() else ''
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            return False
+        if not (isinstance(ev, dict) and ev.get('type') in PRE_MODEL_EVENTS):
+            return False
+    return bool(NOT_STARTED_RE.search(err)) and not QUOTA_RE.search(err)
+
+
 def spawn(cmd, d, prompt, kind, cwd, env=None, stdout_to=None):
-    """Запуск с записью pid; успех — только код 0 и непустой ответ. Иначе failed.json и блокер."""
+    """Запуск с записью pid; успех — только код 0 и непустой ответ. Иначе failed.json и блокер. Один автоповтор после паузы — только если
+    вызов достоверно не начался (not_started); резерв бюджета тот же, повтор записан в retry.json."""
     out_path = d / (stdout_to or 'stdout.log')
     err_path = d / 'stderr.log'
-    with out_path.open('w', encoding='utf-8') as so, err_path.open('w', encoding='utf-8') as se:
-        proc = subprocess.Popen([str(c) for c in cmd], cwd=cwd, stdin=subprocess.PIPE, stdout=so, stderr=se, text=True,
-                                encoding='utf-8', env=env or clean_env())
-        wjson(d / 'process.json', {'pid': proc.pid})
-        try:
-            proc.communicate(prompt, timeout=timeout_for(kind))
-        except (subprocess.TimeoutExpired, KeyboardInterrupt):
-            run(['taskkill', '/PID', str(proc.pid), '/T', '/F']) if os.name == 'nt' else proc.kill()
-            proc.wait(timeout=20)
-            wjson(d / 'failed.json', {'reason': 'timeout/interrupted'})
-            raise Blocked(f'{kind}: таймаут/прерывание; вызов израсходован, автоповтор запрещён', 2) from None
+    for attempt in (1, 2):
+        with out_path.open('w', encoding='utf-8') as so, err_path.open('w', encoding='utf-8') as se:
+            proc = subprocess.Popen([str(c) for c in cmd], cwd=cwd, stdin=subprocess.PIPE, stdout=so, stderr=se, text=True,
+                                    encoding='utf-8', env=env or clean_env())
+            wjson(d / 'process.json', {'pid': proc.pid})
+            try:
+                proc.communicate(prompt, timeout=timeout_for(kind))
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                run(['taskkill', '/PID', str(proc.pid), '/T', '/F']) if os.name == 'nt' else proc.kill()
+                proc.wait(timeout=20)
+                wjson(d / 'failed.json', {'reason': 'timeout/interrupted'})
+                raise Blocked(f'{kind}: таймаут/прерывание; вызов израсходован, автоповтор запрещён', 2) from None
+        if proc.returncode == 0 or attempt == 2 or not not_started(out_path, err_path):
+            break
+        tail = err_path.read_text(encoding='utf-8', errors='replace')[-300:]
+        wjson(d / 'retry.json', {'reason': 'not started', 'exit': proc.returncode, 'tail': tail, 'at': time.time()})
+        warn(f'{kind}: вызов не начался ({tail.strip()[:120]}) — один повтор через {RETRY_PAUSE} с в том же резерве')
+        time.sleep(RETRY_PAUSE)
     if proc.returncode != 0:
         tail = err_path.read_text(encoding='utf-8', errors='replace')[-300:]
         hint = ' (похоже на лимит)' if re.search(r'rate limit|usage limit|quota|429', tail, re.I) else ''
@@ -1425,22 +1541,46 @@ def spawn(cmd, d, prompt, kind, cwd, env=None, stdout_to=None):
     return out_path
 
 
-# ---------------------------------------------------------------- Codex-ревьюер (бэкенд): прежний запуск без изменений
+# ---------------------------------------------------------------- Codex-ревьюер (бэкенд): герметичный запуск, JSON-вердикт по схеме
 
 def launch_codex_review(effort):
+    """Те же границы, что у Codex-автора: без личного конфига, правил и инструментов пользователя (--ignore-user-config, --ignore-rules,
+    отключённые функции), без сохранения сессии; ответ — по схеме CLAUDE_SCHEMA; события --json — для учёта токенов и контроля инструментов."""
     def go(d, prompt):
         codex = find_codex()
         need(codex, 'codex не найден')
         tmp = Path(tempfile.mkdtemp())
         try:
+            schema = tmp / 'review.schema.json'
+            wjson(schema, CLAUDE_SCHEMA)
             out = d / 'answer.txt'
-            spawn([*codex, 'exec', '-m', MODEL, '-c', f'model_reasoning_effort={effort}', '--sandbox', 'read-only',
-                   '--skip-git-repo-check', '-C', tmp, '--output-last-message', out, '-'], d, prompt, 'codex-review', tmp)
+            cmd = [*codex, 'exec', '--ephemeral', '--skip-git-repo-check', '--ignore-rules', '--ignore-user-config',
+                   '-C', tmp, '-s', 'read-only', '--json', '--color', 'never', '--output-schema', schema,
+                   '--output-last-message', out, '-m', MODEL, '-c', f'model_reasoning_effort="{effort}"', '-c', 'web_search="disabled"',
+                   *disable_flags(codex), '-']
+            check_codex_events(spawn(cmd, d, prompt, 'codex-review', tmp, stdout_to='events.jsonl'), d, 'Codex-reviewer')
             if out.exists() and out.stat().st_size:
+                need(out.stat().st_size <= MAX_RESULT, 'ответ Codex слишком велик')
                 wtext(d / 'raw.txt', out.read_text(encoding='utf-8'))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     return go
+
+
+def parse_codex_json(text):
+    """Структурированный вердикт Codex (та же схема, что у Claude-reviewer). Ответ не по схеме — не PASS: диагностика без повторного вызова."""
+    try:
+        res = json.loads(text)
+    except ValueError:
+        raise Blocked('Codex-reviewer вернул не JSON — UNCERTAIN, не PASS; вызов израсходован, автоповтор запрещён') from None
+    ok = (isinstance(res, dict) and res.get('verdict') in ('PASS', 'FIX', 'UNCERTAIN') and isinstance(res.get('summary'), str)
+          and isinstance(res.get('findings'), list) and isinstance(res.get('prior'), list)
+          and all(isinstance(f, dict) and f.get('severity') in ('BLOCKER', 'MAJOR', 'MINOR') and
+                  all(isinstance(f.get(k), str) for k in ('location', 'problem', 'scenario', 'evidence', 'close_when', 'ref', 'fix')) for f in res['findings'])
+          and all(isinstance(p, dict) and p.get('status') in ('closed', 'remains', 'withdrawn') and isinstance(p.get('id'), str)
+                  and isinstance(p.get('note'), str) for p in res['prior']))
+    need(ok, 'Codex-reviewer: ответ не соответствует схеме вердикта — UNCERTAIN, не PASS; вызов израсходован, автоповтор запрещён')
+    return {'verdict': res['verdict'], 'report': render_findings(res), 'structured': res}
 
 
 def parse_codex_review(text):
@@ -1688,6 +1828,26 @@ def disable_flags(codex):
     return out
 
 
+def check_codex_events(events, d, who):
+    """События `codex exec --json`: вызов инструмента или подмена модели (fallback/reroute) отклоняют результат — вызов израсходован."""
+    service = []
+    for line in events.read_text(encoding='utf-8', errors='replace').splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        item = ev.get('item') or {}
+        if item.get('type') in TOOL_ITEMS:
+            wjson(d / 'failed.json', {'reason': 'tool event', 'type': item.get('type')})
+            raise Blocked(f'{who} использовал инструмент — результат отклонён, вызов израсходован')
+        if item.get('type') not in ('agent_message', 'reasoning'):   # текст ответа и рассуждений — содержимое (слово fallback в разбираемом коде), не сигнал CLI
+            service.append(ev)
+    blob = (json.dumps(service) + (d / 'stderr.log').read_text(encoding='utf-8', errors='replace')).lower()
+    if any(m in blob for m in REROUTE):
+        wjson(d / 'failed.json', {'reason': 'model reroute'})
+        raise Blocked('обнаружена подмена модели (fallback/reroute) — результат отклонён, вызов израсходован')
+
+
 def launch_codex_author(effort, files):
     def go(d, prompt):
         codex = find_codex()
@@ -1701,23 +1861,7 @@ def launch_codex_author(effort, files):
                    '-C', tmp, '-s', 'read-only', '--json', '--color', 'never', '--output-schema', schema,
                    '-o', out, '-m', MODEL, '-c', f'model_reasoning_effort="{effort}"', '-c', 'web_search="disabled"',
                    *disable_flags(codex), '-']
-            events = spawn(cmd, d, prompt, 'codex-author', tmp, stdout_to='events.jsonl')
-            service = []
-            for line in events.read_text(encoding='utf-8', errors='replace').splitlines():
-                try:
-                    ev = json.loads(line)
-                except ValueError:
-                    continue
-                item = ev.get('item') or {}
-                if item.get('type') in TOOL_ITEMS:
-                    wjson(d / 'failed.json', {'reason': 'tool event', 'type': item.get('type')})
-                    raise Blocked('Codex-автор использовал инструмент — результат отклонён, вызов израсходован')
-                if item.get('type') != 'agent_message':
-                    service.append(ev)
-            blob = (json.dumps(service) + (d / 'stderr.log').read_text(encoding='utf-8', errors='replace')).lower()
-            if any(m in blob for m in REROUTE):
-                wjson(d / 'failed.json', {'reason': 'model reroute'})
-                raise Blocked('обнаружена подмена модели (fallback/reroute) — результат отклонён, вызов израсходован')
+            check_codex_events(spawn(cmd, d, prompt, 'codex-author', tmp, stdout_to='events.jsonl'), d, 'Codex-автор')
             if out.exists() and out.stat().st_size:
                 need(out.stat().st_size <= MAX_RESULT, 'ответ Codex слишком велик')
                 wtext(d / 'raw.txt', out.read_text(encoding='utf-8'))
@@ -2182,6 +2326,8 @@ def cmd_start(a):
     resumable = [e for e in entries if e['result'] != 'PASS' and not e.get('continued_by')]
     chain, inh = tid, {'author': 0, 'review': 0, 'calls': 0, 'units': {}, 'verdicts': {}, 'meta': {}}
     hard = [a.max_calls] if a.max_calls is not None else []
+    estimate = None
+    need(a.estimate is None or a.estimate >= 1, '--estimate ≥ 1')
     need(not hard or a.max_calls >= 1, '--max-calls ≥ 1')
     if open_e or a.continues:
         if a.continues:
@@ -2196,6 +2342,13 @@ def cmd_start(a):
                     need(e['calls'] >= e.get('inherited_calls', 0),
                          f'журнал повреждён: у записи {e["id"]} вызовов {e["calls"]} меньше перенесённых {e.get("inherited_calls", 0)} — продолжение отказано, нужна ручная проверка .ai/ledger.json')
                     inh['calls'] += e['calls'] - e.get('inherited_calls', 0)
+                    for k, v in (e.get('usage') or {}).items():   # токены — только локальные каждой записи, поэтому сумма по цепочке без удвоения
+                        if isinstance(v, dict) and '/' in k:
+                            role_, service_ = k.split('/', 1)
+                            add_usage(inh.setdefault('usage', {}), role_, service_,
+                                      {kk: v[kk] for kk in ('calls', 'input', 'cached', 'output') if is_int(v.get(kk))})
+                    if is_int(e.get('estimate'), 1) and not a.estimate:   # оценка цепочки переходит в продолжение, если тимлид не задал новую
+                        estimate = e['estimate']
                     for uid, ur in (e['units'] if 'units' in e else {'*': r}).items():   # лимит действует на единицу, не на всю задачу
                         iu = inh['units'].setdefault(uid, {'author': 0, 'review': 0})
                         iu['author'] += ur.get('author', 0)
@@ -2232,7 +2385,8 @@ def cmd_start(a):
     need(branch, 'detached HEAD не поддерживается')
     # Автор и ревью на единицу и вызовы цепочки — контрольные точки (gate): дальше только при подтверждённом прогрессе. Перенесённый расход
     # учитывается по тем же единицам. Жёсткий предел — только заданный Иваном; продолжение берёт наименьший из заданных в цепочке.
-    budget = {'author': DEFAULTS['author'], 'review': DEFAULTS['review'], 'total': DEFAULTS['total'], 'hard': min(hard) if hard else None}
+    budget = {'author': DEFAULTS['author'], 'review': DEFAULTS['review'], 'total': DEFAULTS['total'], 'hard': min(hard) if hard else None,
+              'estimate': a.estimate or estimate}
     need(budget['hard'] is None or inh['calls'] < budget['hard'],
          f'LIMIT: предел Ивана для цепочки работы исчерпан (вызовов {inh["calls"]}/{budget["hard"]}): продолжение его не поднимает — только его решение', 3)
     t.s = {'version': 3, 'id': tid, 'chain': chain, 'goal': goal, 'goal_sha': gsha, 'norm_sha': gnorm, 'base': head, 'branch': branch,
@@ -2781,14 +2935,27 @@ def verify_commit(task, uid, res, head, expected, n):
 # ---------------------------------------------------------------- ревью
 
 def review_prompt(task, uid, n, mode, frm, tip, diff, claude_side, ctx=()):
+    """Порядок блоков: сначала неизменное между кругами (роль, правила, формат, цель, контракт, требования, контекст), затем изменчивое (раунд,
+    SHA, проверки, замечания) и diff — общий префикс запросов одной единицы совпадает, и кэш префикса сервиса может его переиспользовать."""
     u = task.unit(uid)
+    fmt = ('Верни структурированный вердикт: PASS допустим только без BLOCKER/MAJOR; не уверен — UNCERTAIN. Для BLOCKER/MAJOR заполни problem '
+           '(требование или риск), scenario (сценарий), evidence (доказательство), close_when (условие закрытия). MINOR — не больше 3 и только по изменённому коду этой задачи; '
+           'пожелания вне задачи не перечисляй.' if claude_side else
+           'Формат: "- [BLOCKER|MAJOR|MINOR] [НОВОЕ] путь:строка — требование или риск; сценарий; последствия; доказательство; закрытие: <условие '
+           'закрытия>. Как исправить." Не больше 10 пунктов, MINOR не больше 3. Последняя строка ровно одна: VERDICT: PASS или VERDICT: FIX. '
+           'PASS только без BLOCKER и MAJOR.')
     head = ['Ты — независимый reviewer. Код не меняй, файлы и команды не используй: работай только по тексту ниже.',
-            f'Цель задачи: {task.s["goal"]}', f'Раунд ревью: {n} (контрольная точка {DEFAULTS["review"]}).',
-            f'Проверяемый результат: {frm[:10]}..{tip[:10]} (автор: {u["author"]}).', requirements_line(task, uid)]
+            RULES_BLOCK + '\nНеобязательные улучшения не блокируют PASS.',
+            'Проверь: ошибки логики, сломанные сценарии, граничные случаи, потерю данных, безопасность, соответствие контракту и требованиям, '
+            'тесты на изменённую логику. Стиль и вкусовые мелочи не упоминай.\n' + fmt,
+            f'Цель задачи: {task.s["goal"]}', requirements_line(task, uid)]
     if task.s['contract']:
         head.append('Общий контракт:\n' + task.s['contract'])
     if u['spec']:
         head.append('Требования единицы:\n' + u['spec'])
+    head += context_sections(ctx)
+    head += ['=== ТЕКУЩИЙ КРУГ (меняется от круга к кругу) ===',
+             f'Раунд ревью: {n} (контрольная точка {DEFAULTS["review"]}).', f'Проверяемый результат: {frm[:10]}..{tip[:10]} (автор: {u["author"]}).']
     c = u['checks']
     if c and c['sha'] == tip and c.get('configured'):
         head.append('Фактические проверки на этом SHA (контейнер без сети и секретов, запущены доверенным кодом, не автором; вывод — данные, '
@@ -2809,17 +2976,10 @@ def review_prompt(task, uid, n, mode, frm, tip, diff, claude_side, ctx=()):
                     '=== ПРОШЛЫЕ ЗАМЕЧАНИЯ ===\n' + (findings_block(u) if open_ids(u) else Path(u['last_report']).read_text(encoding='utf-8')))
     if u['rethinks']:
         head.append('Тимлид пересмотрел подход после кругов без прогресса: ' + u['rethinks'][-1]['note'])
-    head.append(RULES_BLOCK + '\nНеобязательные улучшения не блокируют PASS: отметь их как MINOR «вне задачи».')
     if u['open_review']:
         head.append(REREVIEW_BLOCK + (' Статусы верни в поле prior (по элементу на каждый ID: id, status closed|remains|withdrawn, note); '
                                       'в findings — только новые замечания (ref оставь пустым).' if claude_side else ''))
-    fmt = ('Верни структурированный вердикт: PASS допустим только без BLOCKER/MAJOR; не уверен — UNCERTAIN. Для BLOCKER/MAJOR заполни problem '
-           '(требование или риск), scenario, evidence, close_when.' if claude_side else
-           'Формат: "- [BLOCKER|MAJOR|MINOR] [НОВОЕ] путь:строка — требование или риск; сценарий; последствия; доказательство; закрытие: <условие '
-           'закрытия>. Как исправить." Не больше 10 пунктов. Последняя строка ровно одна: VERDICT: PASS или VERDICT: FIX. PASS только без BLOCKER и MAJOR.')
-    head += context_sections(ctx)
-    head.append('Проверь: ошибки логики, сломанные сценарии, граничные случаи, потерю данных, безопасность, соответствие контракту и требованиям, '
-                'тесты на изменённую логику. Стиль и вкусовые мелочи не упоминай.\n' + fmt + '\n\n=== DIFF ===')
+    head.append('=== DIFF ===')
     return '\n\n'.join(head) + '\n' + diff
 
 
@@ -2879,7 +3039,12 @@ def do_review(task, uid, effort, full, opts=None):
     full_mode = (full or not reviewed or bool(drift) or redo or
                  git(root, 'merge-base', '--is-ancestor', reviewed, tip, check=False).returncode != 0)
     frm = (u['review_base'] or u['base']) if full_mode else reviewed
-    diff = git(root, 'diff', '--no-ext-diff', '-U15' if fe else '-U3', f'{frm}..{tip}', '--', *pathspec(task, uid))
+    # контекст целой изменённой функции (-W) даёт reviewer вызывающий код без отдельного чтения файлов; не помещается с запасом под
+    # остальной запрос — прежний узкий контекст
+    narrow = ['-U15' if fe else '-U3', f'{frm}..{tip}', '--', *pathspec(task, uid)]
+    diff = git(root, 'diff', '--no-ext-diff', '-W', *narrow)
+    if len(diff) > MAX_DIFF or len(diff.encode('utf-8')) > MAX_PROMPT // 2:
+        diff = git(root, 'diff', '--no-ext-diff', *narrow)
     need(diff, 'diff пуст после исключений')
     need(len(diff) <= MAX_DIFF, f'diff {len(diff)} символов > {MAX_DIFF}: раздели задачу')
     need(not SECRET_RE.search(diff), 'в diff найдено похожее на секрет — в модель не отправлено')
@@ -2888,7 +3053,7 @@ def do_review(task, uid, effort, full, opts=None):
     def build():
         mod2, rules2 = load_rules(root)
         ctx = read_context(root, tip, u['context'], mod2, rules2)   # reviewer читает проверяемый tip, а не рабочее дерево
-        return review_prompt(task, uid, n, 'full' if full_mode else 'incremental', frm, tip, diff, fe, ctx), context_meta(task, uid, ctx)
+        return review_prompt(task, uid, n, 'full' if full_mode else 'incremental', frm, tip, diff, True, ctx), context_meta(task, uid, ctx)
 
     subject = {'tip': tip, 'from': frm, 'full': full_mode}
     legacy_ok = lambda t: f'{frm[:10]}..{tip[:10]}' in t   # запрос прежней версии содержит диапазон «от..до»
@@ -2904,7 +3069,12 @@ def do_review(task, uid, effort, full, opts=None):
         who = f'Claude {prof["model"]}/{prof["effort"]} [{prof["source"]}; свежий контекст]' if prof else 'Claude (профиль прежней версии, не записан)'
     else:
         effort = opts.get('effort') or effort or 'medium'
-        res = model_call(task, uid, 'review', n, 'codex-review', build, launch_codex_review(effort), parse_codex_review, subject=subject, legacy_ok=legacy_ok)
+        key = f'{uid}:review:{n}'
+        base_build = build
+        build = lambda: (lambda b: (b[0], {**(b[1] or {}), 'review_format': 'json'}))(base_build())
+        # формат разбора — по записи резерва: ответ вызова прежней версии (без метки) читается текстовым разбором, новый — только по схеме
+        parse = lambda text: (parse_codex_json if (task.s['calls'].get(key) or {}).get('review_format') == 'json' else parse_codex_review)(text)
+        res = model_call(task, uid, 'review', n, 'codex-review', build, launch_codex_review(effort), parse, subject=subject, legacy_ok=legacy_ok)
         who = f'Codex {MODEL}/{effort}'
     value, report = res['verdict'], res['report']
     structured = (res.get('structured') or {}).get('findings') or []
@@ -2947,7 +3117,15 @@ def do_review(task, uid, effort, full, opts=None):
     u['open_review'] = value != 'PASS'
     task.save()
     static = '' if u['checks'].get('configured') else '\n(механические проверки не применялись: обоснование тимлида зафиксировано)'
-    say(f'Ревью {who} раунд {n} (контрольная точка {DEFAULTS["review"]}) на {tip[:10]}:\n{report}\nVERDICT: {value}{static}{note}{engine_note}')
+    if VERBOSE:
+        say(f'Ревью {who} раунд {n} (контрольная точка {DEFAULTS["review"]}) на {tip[:10]}:\n{report}\nVERDICT: {value}{static}{note}{engine_note}')
+    else:   # сводка в контекст тимлида; полный текст — в файле отчёта (или --verbose)
+        fs = u['findings']
+        brief = ''.join(f'  {i} [{fs[i]["severity"]}] {one_line(fs[i]["location"])} — {one_line(fs[i]["last"] or fs[i]["text"])[:160]}\n'
+                        for i in open_ids(u))
+        diag = ''.join(f'  диагностика: {x}\n' for x in ap['diag'])
+        say(f'Ревью {who} раунд {n} на {tip[:10]}: VERDICT: {value}; {fmt_findings(u) or "замечаний нет"}{static}{note}\n'
+            f'{brief}{diag}Полный отчёт: {out}')
     return 0 if value == 'PASS' else 1
 
 
@@ -3233,12 +3411,75 @@ def accepted(task, uid):
     return git(root, 'diff', '--no-ext-diff', '--quiet', f'{sha_ok}..HEAD', '--', *spec, check=False).returncode == 0
 
 
-def cmd_status(a):
+def status_data(t):
+    """Машинная сводка расхода (status --json, report): вызовы с причинами и исходом, токены по ролям и сервисам, круги, замечания, оценка."""
+    ts = timing_summary(t)
+    ends = {}
+    for p in sorted((t.dir / 'timing').glob('*.jsonl')) if (t.dir / 'timing').is_dir() else []:
+        for line in p.read_text(encoding='utf-8', errors='replace').splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(e, dict) and e.get('ev') == 'end' and isinstance(e.get('id'), str):
+                ends.setdefault(e['id'], e)
+    calls = []
+    for k, c in sorted(t.s['calls'].items(), key=lambda kv: kv[1].get('at') or 0):
+        e = ends.get(k) or {}
+        done = (t.dir / 'calls' / k.replace(':', '-') / 'receipt.json').exists()
+        calls.append({'key': k, 'unit': c.get('unit'), 'role': c.get('role'), 'kind': c.get('kind'), 'service': service_of(c.get('kind')),
+                      'cause': c.get('cause', 'unknown'), 'outcome': 'ok' if done else (e.get('outcome') or 'unknown'),
+                      'duration_s': e.get('duration_s'), 'tokens': e.get('tokens')})
+    units = {k: {'kind': u['kind'], 'status': u['status'], 'author_calls': t.spent(k, 'author'), 'review_calls': t.spent(k, 'review'),
+                 'rounds': [{'sha': (r.get('sha') or '')[:10], 'progress': r.get('progress'), 'why': r.get('why')} for r in u['rounds']],
+                 'findings': {st: sum(1 for f in u['findings'].values() if f['status'] == st) for st in ('open', 'closed', 'withdrawn')},
+                 'verdict': (u['verdict'] or {}).get('value')} for k, u in t.s['units'].items()}
+    est, used = t.s['budget'].get('estimate'), t.chain_calls()
+    return {'id': t.s['id'], 'chain': t.s.get('chain', t.s['id']), 'calls_chain': used, 'calls_task': len(t.s['calls']),
+            'inherited_calls': (t.s.get('inherited') or {}).get('calls', 0), 'estimate': est,
+            'over_estimate': [c['key'] + ': ' + CAUSE_RU.get(c['cause'], c['cause']) for c in calls[max(0, est - (used - len(calls))):]] if est and used > est else [],
+            'hard': t.s['budget'].get('hard'), 'usage': ts['usage'], 'usage_inherited': (t.s.get('inherited') or {}).get('usage') or {},
+            'time_s': {k: round(v['sec'], 1) for k, v in ts['stages'].items()}, 'calls': calls, 'units': units}
+
+
+def report_lines(d):
+    lines = [f'Расход цепочки {d["chain"]}: вызовов {d["calls_chain"]} (в этой задаче {d["calls_task"]}, перенесено {d["inherited_calls"]})' +
+             (f', оценка {d["estimate"]}' if d['estimate'] else ', оценка не задана') + (f', предел Ивана {d["hard"]}' if d['hard'] else '')]
+    if d['over_estimate']:
+        lines.append(f'ОЦЕНКА ПРЕВЫШЕНА на {d["calls_chain"] - d["estimate"]} (не лимит; новое согласование в пределах бюджета не нужно). Сверх оценки: ' +
+                     '; '.join(d['over_estimate']))
+    for c in d['calls']:
+        tok = c['tokens'] or {}
+        lines.append(f'  {c["key"]} [{c["service"]}] причина: {CAUSE_RU.get(c["cause"], c["cause"])}; исход {c["outcome"]}' +
+                     (f'; {c["duration_s"]:.0f} с' if isinstance(c['duration_s'], (int, float)) else '') +
+                     (f'; токены вход {tok.get("input_tokens")} (кэш {tok.get("cache_read_input_tokens", 0)}), выход {tok.get("output_tokens")}' if tok else '; токены неизвестны'))
+    for k, u in d['units'].items():
+        lines.append(f'  единица {k}: кругов {len(u["rounds"])}, без прогресса {sum(1 for r in u["rounds"] if not r["progress"])}; замечания открыто '
+                     f'{u["findings"]["open"]}, закрыто {u["findings"]["closed"]}, снято {u["findings"]["withdrawn"]}; вердикт {u["verdict"] or "-"}')
+    if d['usage']:
+        lines.append('  токены: ' + usage_text(d['usage']))
+    return lines
+
+
+def cmd_report(a):
     t = Task(repo_root())
     if not t.path.exists():
         say('Активной задачи нет')
         return 0
+    for line in report_lines(status_data(t.load())):
+        say(line)
+    return 0
+
+
+def cmd_status(a):
+    t = Task(repo_root())
+    if not t.path.exists():
+        say(json.dumps({'active': False}) if getattr(a, 'json', False) else 'Активной задачи нет')
+        return 0
     t.load()
+    if getattr(a, 'json', False):
+        say(json.dumps({'active': True, **status_data(t)}, ensure_ascii=False, indent=1))
+        return 0
     b = t.s['budget']
     say(f'Задача {t.s["id"]}: {t.s["goal"]}\nБаза {t.s["base"][:10]}, ветка {t.s["branch"]}, вызовов цепочки {t.chain_calls()} '
         f'(контрольная точка {DEFAULTS["total"]}' + (f', предел Ивана {b["hard"]})' if b.get('hard') else ')'))
@@ -3259,6 +3500,11 @@ def cmd_status(a):
         say(line)
     for line in route_lines(t):
         say(line)
+    d = status_data(t)
+    if d['estimate']:
+        say(report_lines(d)[0])
+        if d['over_estimate']:
+            say(report_lines(d)[1])
     return 0
 
 
@@ -3300,6 +3546,9 @@ def cmd_finish(a):
                     'calls': len(t.s['calls']) + t.s.get('inherited', {}).get('calls', 0),
                     'inherited_calls': t.s.get('inherited', {}).get('calls', 0),
                     'max_calls': t.s['budget'].get('hard'),
+                    **({'estimate': t.s['budget']['estimate']} if t.s['budget'].get('estimate') else {}),
+                    'usage': timing_summary(t)['usage'],
+                    'causes': {k: c.get('cause', 'unknown') for k, c in t.s['calls'].items()},
                     'verdicts': {k: {'value': u['verdict']['value'], 'sha': u['verdict']['sha'],
                                      **({'context': u['verdict']['context']} if u['verdict'].get('context') else {}),
                                      **({'requirements': u['verdict']['requirements']} if u['verdict'].get('requirements') else {})}
@@ -3354,6 +3603,7 @@ def main(argv=None):
     s.add_argument('--continues', help='id непринятой задачи: её расход переносится в бюджет новой')
     s.add_argument('--new-work', help='причина (решение Ивана): новая работа, не связанная с непринятой задачей')
     s.add_argument('--max-calls', type=int, help='жёсткий предел вызовов моделей на цепочку работы (только по решению Ивана)')
+    s.add_argument('--estimate', type=int, help='начальная оценка обращений к моделям на цепочку (не лимит: превышение только сообщается)')
     s = sub.add_parser('unit')
     s.add_argument('uid')
     s.add_argument('--kind', choices=['backend', 'frontend', 'protected'], required=True)
@@ -3369,9 +3619,11 @@ def main(argv=None):
             route_args(s)
             s.add_argument('--task-file', help='backend: задание автору Claude (≤ 4000 символов); frontend — не нужен')
         s.add_argument('--wait', type=int, default=0, help='секунд ждать готовности зависимостей --after (без вызовов моделей); иначе код 5 WAIT')
+        s.add_argument('--verbose', action='store_true', help='печатать полный отчёт ревью (по умолчанию — вердикт, открытые ID и путь к отчёту)')
     s = sub.add_parser('review')
     s.add_argument('rest', nargs='*')
     s.add_argument('--full', action='store_true')
+    s.add_argument('--verbose', action='store_true', help='печатать полный отчёт ревью')
     route_args(s)
     s = sub.add_parser('profile', help='предпросмотр профиля Claude для роли единицы (без вызова модели; фактический запуск сам сохраняет профиль и причину)')
     s.add_argument('uid')
@@ -3394,10 +3646,14 @@ def main(argv=None):
     s = sub.add_parser('rethink', help='после остановки за кругами без прогресса: причина и новый, более простой подход (один раз на единицу)')
     s.add_argument('uid')
     s.add_argument('note')
-    sub.add_parser('status')
+    s = sub.add_parser('status')
+    s.add_argument('--json', action='store_true', help='машинная сводка: вызовы с причинами, токены по ролям и сервисам, круги, замечания')
+    sub.add_parser('report', help='расход задачи: каждый вызов с причиной, исходом, временем и токенами; превышение оценки')
     s = sub.add_parser('finish')
     s.add_argument('--abandon', action='store_true', help='закрыть непринятую задачу (расход остаётся в журнале)')
     a = p.parse_args(argv)
+    global VERBOSE
+    VERBOSE = bool(getattr(a, 'verbose', False)) or os.environ.get('AGENTQ_VERBOSE') == '1'
     try:
         if a.cmd == 'review':
             a.effort = next((r for r in a.rest if r in EFFORTS), None)   # None — не задан: Codex medium, профиль Claude по политике
@@ -3406,6 +3662,8 @@ def main(argv=None):
             a.uid = others[0] if others else None
         if a.cmd == 'route':
             return cmd_route(a)
+        if a.cmd == 'report':
+            return cmd_report(a)   # только чтение, как status
         if a.cmd == 'status':
             return cmd_status(a)   # без блокировок: state.json заменяется атомарно, статус можно смотреть во время работы единиц
         root = repo_root()
@@ -3430,6 +3688,9 @@ def main(argv=None):
                     'profile': cmd_profile, 'author-claude': cmd_author_claude}[a.cmd](a)
     except Blocked as e:
         print(f'{ {3: "LIMIT", 4: "BUSY", 5: "WAIT"}.get(e.code, "ERROR") }: {e}', file=sys.stderr)
+        ref = {2: 'recovery.md', 3: 'budget.md'}.get(e.code)
+        if ref and (e.code == 3 or 'вызов' in str(e)):   # код 2 — только сбой вызова модели, не ошибка настройки   # справка читается тимлидом только при такой остановке, а не держится в контексте навыка
+            print(f'Справка: {Path(__file__).resolve().parent / "reference" / ref}', file=sys.stderr)
         return e.code
     except (OSError, ValueError, subprocess.SubprocessError, KeyError, TypeError, AttributeError, IndexError) as e:
         print(f'ERROR: {type(e).__name__}: {e}', file=sys.stderr)

@@ -1,5 +1,5 @@
 {
-  "version": "1.4.0",
+  "version": "1.5.0",
   "source_of_truth": "ivanermolenko61-commits/Orchestrator-Codex-Claude-code",
   "engine_origin": {
     "repository": "ivanermolenko61-commits/ai-knowledge",
@@ -11,7 +11,7 @@
     "skills/agentq/agentq_global.py": {
       "source_blob": "bc1043d1920d44b84083aec107aeb4fd432ba899",
       "unchanged_from_source": false,
-      "changed_in": "1.4.0: автоматический выбор модели и усилия Claude (профиль reviewer в argv, политика, журнал, сверка фактической модели); требует собственной независимой приёмки вне движка (Codex)"
+      "changed_in": "1.5.0: учёт расхода Codex и причин вызовов (status --json, report, --estimate), JSON-вердикт и герметичный запуск Codex-reviewer, единственный автоповтор не начавшегося вызова, стабильный префикс промпта ревью, diff -W, сжатый вывод; требует собственной независимой приёмки вне движка (Codex)"
     },
     "skills/agentq/codex-review.sh": {
       "source_blob": "cb0ab9fbe888925f8d53cd716d714841454bb898",
@@ -20,7 +20,7 @@
     "skills/agentq/selftest.py": {
       "source_blob": "e86e37a2d83544658552734dfa87355441de8ff8",
       "unchanged_from_source": false,
-      "changed_in": "1.4.0: автоматический выбор модели и усилия Claude (профиль reviewer в argv, политика, журнал, сверка фактической модели); требует собственной независимой приёмки вне движка (Codex)"
+      "changed_in": "1.5.0: учёт расхода Codex и причин вызовов (status --json, report, --estimate), JSON-вердикт и герметичный запуск Codex-reviewer, единственный автоповтор не начавшегося вызова, стабильный префикс промпта ревью, diff -W, сжатый вывод; требует собственной независимой приёмки вне движка (Codex)"
     }
   },
   "files": {
@@ -53,8 +53,8 @@
       "git_blob": "a935f5a49d23a01acc13363e2be2a7080d2709ec"
     },
     "global/CLAUDE.md": {
-      "sha256": "aa8eeba78df136c17f18f8903ab95a80814987f070bd52f054db8b181dc0abbb",
-      "git_blob": "ad755afca9f6cb350ab70d55f6ecc30813af21e6"
+      "sha256": "b3f597b0a39e5d478fa42d21724c43a0f1e4d0bf4b175282ed5a5bf8fd4855b2",
+      "git_blob": "cb6762f73194aa0f4d8bab3ba4f3629fe0b56917"
     },
     "global/scripts/agentsrules.py": {
       "sha256": "f0e1215e0c2b58524dce478077751f537c3c3007494267b7e9caa85e9633320d",
@@ -69,12 +69,12 @@
       "git_blob": "60d1b412a46d37040649119db4d24ee0f3bf76d9"
     },
     "README.md": {
-      "sha256": "5e59f47d0be4be08286fb28a829672876714db9a5f306715065dfc3b50ced319",
-      "git_blob": "8d49ee97bbd94929fa55eafdc12fb4a2ff8c4cd8"
+      "sha256": "99c4e0e6eb58e709d6837d5ebc61f0c174ec1e789730274796329bd238c39e34",
+      "git_blob": "0367ae11ed6842d6bc766bb84d4af766775767bb"
     },
     "scripts/install-global.sh": {
-      "sha256": "b66806667f561d4ceda10d6fe017bf767bc217c2da46c62d4a6978473046cb6b",
-      "git_blob": "772902c0cde723c18d4656f145d973eb8ef23efb"
+      "sha256": "54947b4161b02c7e8bcf1889bec7d17d3f989c3ffe368ee9e193a6f76a6b1470",
+      "git_blob": "6b08bd5b3dd0aff5d2c98d917c6a56fb0a4d7f2e"
     },
     "scripts/manifest.py": {
       "sha256": "5c8d5ee365367ac5ea148281d631befaac7136a6826b64839c38dd3fe132655a",
@@ -85,24 +85,48 @@
       "git_blob": "f5683b1af358ca61e9600f4b4547af176ca18d38"
     },
     "skills/agentq/agentq_global.py": {
-      "sha256": "c7656d1dd3fc7354caf03d65d4b9b69697542f53f3c69d0c09c97ab59e4673d7",
-      "git_blob": "77c53b3d5247cd5583b335d94aa347ab9dcae7a2"
+      "sha256": "7122d4e4646613ddfbaa5502d22741dbe916e5837d3ac9f2fa542aed2f20db48",
+      "git_blob": "e4b44ff3e124a582def5bab13f8a6a5f0ca177d7"
     },
     "skills/agentq/codex-review.sh": {
       "sha256": "c78dc298bb0520f6c4c76b60133b3628d715e1db9947ed4ccb2a245a49ae4a3e",
       "git_blob": "cb0ab9fbe888925f8d53cd716d714841454bb898"
     },
+    "skills/agentq/reference/budget.md": {
+      "sha256": "bfe38a5d3162c1d6f5c753c76fd9bf41eecce5fef2326c9179867b7fc2a3a432",
+      "git_blob": "a9f21067cb47fac2de4beb1b2eafa758a6fba1f0"
+    },
+    "skills/agentq/reference/checks.md": {
+      "sha256": "519e4c7be11e6b0df6a977ede1ccce6502e48f76df6baee39ffe1af0b6227039",
+      "git_blob": "7f299f385174719ebbe0d344f06d8ccde51977e7"
+    },
+    "skills/agentq/reference/findings.md": {
+      "sha256": "810de36599844a281125c81045df815a3b755aecff7a32b81940a48d9bfc5c24",
+      "git_blob": "ef795c9646edb8d4e8cea64969e51ce84ba396c6"
+    },
+    "skills/agentq/reference/model-policy.md": {
+      "sha256": "6b7f84fa0f432851ba640121caf9d14caf4a198663918b85dc49f823150744c9",
+      "git_blob": "9f80d49ad236ea662c9cade46065822d749952a0"
+    },
+    "skills/agentq/reference/prompting.md": {
+      "sha256": "819fc15e4290baf062966b97ce71a6f5ff3ddd3f9b76cc0a8bf08a318680ca94",
+      "git_blob": "0753044699ab3f7c6cf6320585ed9f0535b0e111"
+    },
+    "skills/agentq/reference/recovery.md": {
+      "sha256": "de9253ae61483a41bce4143b81587420cd0e8e2b7adfc186d5737a12c9b71a3e",
+      "git_blob": "0ad1617e60c0094423ba33d2ba6fadb478c23c59"
+    },
     "skills/agentq/selftest.py": {
-      "sha256": "d3f42d6d2b6687d7031126e37fda9d2f80eef21c1714d0b8159c4031fcaf0255",
-      "git_blob": "478557e52b7357ad0fcb2c6d40c94e45303dbb8f"
+      "sha256": "54d3aa42e14d957f58db8dedb9302f915ab65be76da158c0b637caace0f5d4cb",
+      "git_blob": "0b97b9a9db46eb76b82459a147e826c848924823"
     },
     "skills/agentq/SKILL.md": {
-      "sha256": "19718f613ad5b641802464c8a4f5fd59370449aefe7e4fd1af03ef924b5d6938",
-      "git_blob": "e9c4b3193f3cdad8c83a2bfc2a5d67c23c619e66"
+      "sha256": "0cde7c27aabb7801f6ab8e5463cef8d167c25c71c58f4e0343d77ccca624619e",
+      "git_blob": "0294b50e3fcbc4c69237fb96f9121acd2cc05958"
     },
     "VERSION": {
-      "sha256": "78b591400c56b7b67b8cb3b2b8a8e65e9093897f02ce0878e6b5405c68620fa7",
-      "git_blob": "88c5fb891dcf1d1647d2b84bac0630cf9570d213"
+      "sha256": "acb57a7135b2d7d6e665f67f056e21353023b93835f54def1ae523bf76f1bfb3",
+      "git_blob": "bc80560fad66ca670bdfbd1e5c973a024d4d0325"
     }
   }
 }

@@ -34,7 +34,8 @@ if a[:2] == ['features', 'list']:
         print(n + '  stable  true')
     sys.exit(0)
 prompt = sys.stdin.read()
-author = '--output-schema' in a
+author = '-o' in a   # автор: -o; reviewer: --output-last-message (оба с --output-schema)
+structured = '--output-schema' in a
 out = a[a.index('-o') + 1] if '-o' in a else a[a.index('--output-last-message') + 1]
 def claim(prefix):   # атомарный счётчик: вызовы могут идти одновременно
     i = 0
@@ -48,6 +49,7 @@ role = 'author' if author else 'review'
 with (d / 'calls.log').open('a') as f:
     f.write(('codex-author' if author else 'codex-review') + ' model=' + a[a.index('-m') + 1] + ' tools_off=' + str('shell_tool' in a) + '\n')
 (d / f'codex-prompt-{n}.txt').write_text(prompt, encoding='utf-8')
+(d / f'codex-argv-{n}.json').write_text(json.dumps(a), encoding='utf-8')
 items = json.loads((d / 'codex.json').read_text())
 # сценарии с ключом role выбираются по роли (порядок старта параллельных вызовов не определён), остальные — по номеру вызова
 sc = [e for e in items if e.get('role') == role][claim('codex-' + role)] if any('role' in e for e in items) else items[n]
@@ -58,15 +60,43 @@ try:
 finally:
     with (d / 'timeline.log').open('a') as f:
         f.write(f'{time.time()} end codex-{role}\n')
-if sc.get('fail'): print('rate limit 429', file=sys.stderr); sys.exit(1)
+if sc.get('fail') == 'transient':   # отказ до обращения к модели: только служебное событие и 429
+    print(json.dumps({'type': 'thread.started'})); print('stream error: 429 Too Many Requests', file=sys.stderr); sys.exit(1)
+if sc.get('fail'): print('usage limit reached (429)', file=sys.stderr); sys.exit(1)
+if sc.get('usage'):   # учёт токенов: события turn.completed, как у codex exec --json
+    for u_ in sc['usage']:
+        print(json.dumps({'type': 'turn.completed', 'usage': u_}))
+for ev_ in sc.get('events') or []:   # дополнительные события --json (рассуждения, служебные, инструменты)
+    print(json.dumps(ev_))
 if author:
     if sc.get('tool'):
         print(json.dumps({'item': {'type': 'command_execution'}}))
     print(json.dumps({'item': {'type': 'agent_message'}}))
     Path(out).write_text(json.dumps({'files': [{'path': p, 'content': c} for p, c in sc['files'].items()],
                                      'notes': sc.get('notes', 'ok'), 'unmet_requirements': sc.get('unmet', [])}))
-else:
-    Path(out).write_text(sc['text'], encoding='utf-8')
+elif not structured or 'raw' in sc:   # ответ как есть: прежний текстовый формат или проверка ответа не по схеме
+    Path(out).write_text(sc.get('raw', sc.get('text', '')), encoding='utf-8')
+elif 'json' in sc:
+    Path(out).write_text(json.dumps(sc['json'], ensure_ascii=False), encoding='utf-8')
+else:   # текстовый сценарий -> JSON-вердикт тем же разборщиком движка (семантика меток сохраняется)
+    import importlib.util as iu_
+    spec_ = iu_.spec_from_file_location('aq_engine', (d / 'engine.txt').read_text(encoding='utf-8'))
+    eng = iu_.module_from_spec(spec_); spec_.loader.exec_module(eng)
+    text = sc['text']
+    last = eng.re.sub(r'[*`\r]', '', next((l for l in reversed(text.splitlines()) if l.strip()), '')).strip()
+    if last not in ('VERDICT: PASS', 'VERDICT: FIX'):
+        Path(out).write_text(text, encoding='utf-8')   # без вердикта: не JSON, как и прежде не PASS
+    else:
+        pr = eng.parse_report_text(text)
+        # PASS, в котором разборщик не нашёл ни замечаний, ни статусов (например, «> [MAJOR]» в цитате), — текст идёт в summary: так
+        # reviewer упоминает проблему в сводке, и защита «PASS при BLOCKER/MAJOR в отчёте» проверяется по отрисованному отчёту
+        body = [l for l in text.splitlines() if l.strip()][:-1] if last == 'VERDICT: PASS' and not pr['new'] and not pr['refs'] else []
+        res = {'verdict': last.split()[-1], 'summary': '\n'.join(body),
+               'findings': [{'severity': f['severity'], 'location': f['location'], 'problem': f['text'], 'scenario': '', 'evidence': '',
+                             'close_when': f['close_when'], 'ref': '', 'fix': ''} for f in pr['new']] +
+                           [{'severity': 'MINOR', 'location': '', 'problem': 'minor', 'scenario': '', 'evidence': '', 'close_when': '', 'ref': '', 'fix': ''}] * pr['minor'],
+               'prior': [{'id': fid or '', 'status': st or 'remains', 'note': note} for st, fid, note in pr['refs']]}
+        Path(out).write_text(json.dumps(res, ensure_ascii=False), encoding='utf-8')
 '''
 
 FAKE_CLAUDE = r'''
@@ -184,6 +214,7 @@ class Proj:
         for d in (self.repo, self.fake, self.wt):
             d.mkdir(parents=True)
         (self.fake / 'fake_codex.py').write_text(FAKE_CODEX, encoding='utf-8')
+        (self.fake / 'engine.txt').write_text(str(ENGINE), encoding='utf-8')
         (self.fake / 'fake_claude.py').write_text(FAKE_CLAUDE, encoding='utf-8')
         (self.fake / 'fake_docker.py').write_text(FAKE_DOCKER, encoding='utf-8')
         files = {'AGENTS.md': f'# card\n- Режим проекта: {mode}\n', 'backend/app.py': 'def add(a, b):\n    return a + b\n',
@@ -202,7 +233,7 @@ class Proj:
         self.git('add', '-A')
         self.git('commit', '-q', '-m', 'init')
         self.env = dict(os.environ)
-        self.env.update(AQ_WORKTREES=str(self.wt), FAKE_DIR=str(self.fake),
+        self.env.update(AQ_WORKTREES=str(self.wt), FAKE_DIR=str(self.fake), AGENTQ_VERBOSE='1', AGENTQ_RETRY_PAUSE='0',
                         CODEX_BIN=json.dumps([sys.executable, str(self.fake / 'fake_codex.py')]),
                         CLAUDE_BIN=json.dumps([sys.executable, str(self.fake / 'fake_claude.py')]),
                         DOCKER_BIN=json.dumps([sys.executable, str(self.fake / 'fake_docker.py')]))
@@ -3451,11 +3482,141 @@ def t_claude_author():
           and wg(cy, 'show', 'HEAD:backend/app.py', uid='b2') == APP_C2.strip(), err6 + out7 + err7)
 
 
+FUNC_V0 = 'def add(a, b):\n    x = a\n    y = b\n    z = 0\n    w = 0\n    v = 0\n    return x + y\n'
+FUNC_V1 = FUNC_V0.replace('    return x + y\n', '    return x + y + 1\n')
+
+
+def t_v15():
+    """1.5.0: учёт расхода Codex и причин, JSON-вердикт Codex, герметичный reviewer, автоповтор только не начавшегося вызова, порядок промпта,
+    контекст функции в diff, сжатый вывод, оценка обращений, перенос токенов по --continues, ссылка на справку."""
+    # --- A. токены Codex, причины, порядок промпта, -W, сжатый вывод, герметичный запуск
+    a = Proj('v15-a')
+    a.commit('backend/app.py', FUNC_V0, 'base fn')
+    a.cr('start', 'учёт расхода', '--id', 'v15-a', '--estimate', '1')
+    a.commit('backend/app.py', FUNC_V1)
+    a.script('codex', [{'text': '- [MAJOR] backend/app.py:7 — плохо.\nVERDICT: FIX',
+                        'usage': [{'input_tokens': 100, 'cached_input_tokens': 40, 'output_tokens': 7}, {'input_tokens': 10, 'output_tokens': 3}]},
+                       {'text': '[ЗАКРЫТО F1] исправлено\nVERDICT: PASS', 'usage': [{'input_tokens': 120, 'cached_input_tokens': 90, 'output_tokens': 5}]}])
+    rc1, out1, _ = a.cr('review', env={'AGENTQ_VERBOSE': '0'})
+    argv = json.loads((a.fake / 'codex-argv-0.json').read_text(encoding='utf-8'))
+    check('1.5: Codex-reviewer герметичен — --ephemeral, --ignore-rules, --ignore-user-config, --json, --output-schema, отключён shell_tool',
+          all(f in argv for f in ('--ephemeral', '--ignore-rules', '--ignore-user-config', '--json', '--output-schema'))
+          and 'shell_tool' in argv and argv[argv.index('shell_tool') - 1] == '--disable', argv)
+    check('1.5: сжатый вывод ревью — вердикт, открытые ID одной строкой, путь к отчёту; полного текста нет',
+          rc1 == 1 and 'VERDICT: FIX' in out1 and 'F1 [MAJOR]' in out1 and 'Полный отчёт:' in out1 and 'Как исправить' not in out1, out1)
+    a.commit('backend/app.py', FUNC_V1.replace('+ 1', '+ 2'), 'fix')
+    rc2, out2, _ = a.cr('review', '--verbose', env={'AGENTQ_VERBOSE': '0'})
+    check('1.5: --verbose печатает полный отчёт', rc2 == 0 and 'прежнее F1: closed' in out2 and 'Полный отчёт:' not in out2, out2)
+    p0, p1 = [f.read_text(encoding='utf-8') for f in codex_prompts(a)]
+    cut = '=== ТЕКУЩИЙ КРУГ'
+    check('1.5: порядок промпта — неизменное (правила, цель, требования) до текущего круга; префикс двух кругов совпадает',
+          p0.index('КРИТЕРИИ ГОТОВНОСТИ') < p0.index('Цель задачи') < p0.index(cut) < p0.index('Раунд ревью') < p0.index('=== DIFF ===')
+          and p0.split(cut)[0] == p1.split(cut)[0], p0[:600])
+    check('1.5: diff с контекстом целой функции (-W): строка def видна, хотя изменение на 5 строк ниже', 'def add(a, b):' in p0.split('=== DIFF ===')[1], p0[-600:])
+    d = json.loads(a.cr('status', '--json')[1])
+    rv = d['usage'].get('review/codex') or {}
+    check('1.5: токены Codex из turn.completed.usage — сумма по ходам и вызовам, кэш отдельно, по роли и сервису',
+          rv == {'calls': 2, 'input': 230, 'cached': 130, 'output': 15}, d['usage'])
+    check('1.5: причина вызова в записи резерва — первый, затем новый кандидат', [c['cause'] for c in d['calls']] == ['first', 'new_candidate'], d['calls'])
+    rc, rep, _ = a.cr('report')
+    check('1.5: report и status показывают превышение оценки с причиной вызова сверх неё (без нового согласования)',
+          rc == 0 and 'ОЦЕНКА ПРЕВЫШЕНА на 1' in rep and 'main:review:2: новый кандидат' in rep
+          and 'ОЦЕНКА ПРЕВЫШЕНА' in a.cr('status')[1], rep)
+    a.commit('backend/app.py', FUNC_V1.replace('+ 1', '+ 3'), 'после PASS')   # PASS не на текущем SHA — задача не принята
+    a.cr('finish', '--abandon')
+    a.cr('start', 'учёт расхода', '--id', 'v15-a2', '--continues', 'v15-a')
+    d2 = json.loads(a.cr('status', '--json')[1])
+    check('1.5: --continues переносит токены и оценку цепочки, не обнуляя их',
+          (d2['usage_inherited'].get('review/codex') or {}).get('input') == 230 and d2['estimate'] == 1 and d2['inherited_calls'] == 2, d2)
+    led = rledger(a)[-1]
+    check('1.5: журнал задачи хранит локальный расход токенов и причины вызовов', led['usage']['review/codex']['output'] == 15
+          and set(led['causes'].values()) == {'first', 'new_candidate'}, led)
+
+    # --- B. ответ Codex не по схеме: не PASS, без скрытого повтора; ссылка на справку
+    b = Proj('v15-b')
+    b.cr('start', 'схема', '--id', 'v15-b')
+    b.commit('backend/app.py', ADD2)
+    b.script('codex', [{'raw': 'Всё хорошо, VERDICT: PASS'}, {'text': 'VERDICT: PASS'}])
+    rc, _, err = b.cr('review')
+    rc2, _, err2 = b.cr('review')
+    check('1.5: ответ Codex не JSON — блокер (не PASS), повторный review читает тот же ответ без нового вызова',
+          rc == 2 and rc2 == 2 and b.count('codex-review') == 1 and 'не JSON' in err and rstate(b)['units']['main']['verdict'] is None, err + err2)
+    check('1.5: при коде 2 движок называет файл справки', 'recovery.md' in err, err)
+    c = Proj('v15-c')
+    c.cr('start', 'схема', '--id', 'v15-c')
+    c.commit('backend/app.py', ADD2)
+    c.script('codex', [{'json': {'verdict': 'PASS', 'summary': 'ok', 'findings': []}}])
+    rc, _, err = c.cr('review')
+    check('1.5: JSON без обязательного поля (prior) — не PASS', rc == 2 and 'схеме' in err and c.count('codex-review') == 1, err)
+    c2 = Proj('v15-c2')
+    c2.cr('start', 'схема', '--id', 'v15-c2')
+    c2.commit('backend/app.py', ADD2)
+    c2.script('codex', [{'json': {'verdict': 'PASS', 'summary': 'ok', 'prior': [],
+                                  'findings': [{'severity': 'MAJOR', 'location': 'backend/app.py:2', 'problem': 'p', 'scenario': 's', 'evidence': 'e',
+                                                'close_when': 'c', 'ref': '', 'fix': 'f'}]}}])
+    rc, out, _ = c2.cr('review')
+    check('1.5: JSON PASS при новом MAJOR — FIX, замечание в реестре', rc == 1 and 'F1' in rstate(c2)['units']['main']['findings'], out)
+
+    # --- C. резерв прежней версии (без review_format) с текстовым ответом читается текстовым разбором, без нового вызова
+    e = Proj('v15-e')
+    e.cr('start', 'прежний формат', '--id', 'v15-e')
+    e.commit('backend/app.py', ADD2)
+    e.script('codex', [{'raw': 'Замечаний нет.\nVERDICT: PASS'}])
+    rc0, _, _ = e.cr('review')
+    st = rstate(e)
+    for k_ in st['calls']:
+        st['calls'][k_].pop('review_format', None)
+    (e.repo / '.ai/task/state.json').write_text(json.dumps(st), encoding='utf-8')
+    rc, out, err = e.cr('review')
+    check('1.5: ответ вызова прежней версии (текст, нет review_format) восстанавливается текстовым разбором без нового вызова',
+          rc0 == 2 and rc == 0 and e.count('codex-review') == 1 and 'VERDICT: PASS' in out, (rc0, out, err))
+
+    # --- D. автоповтор: один — только для достоверно не начавшегося вызова
+    f = Proj('v15-f')
+    f.cr('start', 'повтор', '--id', 'v15-f')
+    f.commit('backend/app.py', ADD2)
+    f.script('codex', [{'fail': 'transient'}, {'text': 'VERDICT: PASS'}])
+    rc, out, err = f.cr('review')
+    calls_ = rstate(f)['calls']
+    check('1.5: не начавшийся вызов (только thread.started и 429) повторяется один раз в том же резерве',
+          rc == 0 and f.count('codex-review') == 2 and len(calls_) == 1
+          and (f.repo / '.ai/task/calls/main-review-1/retry.json').exists(), (rc, out, err, calls_))
+    g = Proj('v15-g')
+    g.cr('start', 'квота', '--id', 'v15-g')
+    g.commit('backend/app.py', ADD2)
+    g.script('codex', [{'fail': 1}, {'text': 'VERDICT: PASS'}])
+    rc, _, err = g.cr('review')
+    check('1.5: исчерпанная квота (usage limit) не повторяется: блокер, один запуск', rc == 2 and g.count('codex-review') == 1, err)
+    h = Proj('v15-h')
+    h.cr('start', 'дважды', '--id', 'v15-h')
+    h.commit('backend/app.py', ADD2)
+    h.script('codex', [{'fail': 'transient'}, {'fail': 'transient'}, {'text': 'VERDICT: PASS'}])
+    rc, _, err = h.cr('review')
+    check('1.5: повтор не больше одного: второй отказ — блокер', rc == 2 and h.count('codex-review') == 2, err)
+
+    # --- E2. события Codex-reviewer: рассуждение со словом fallback — содержимое; подмена модели и инструмент — отказ
+    for label, evs, want in (('рассуждение со словом fallback принимается', [{'type': 'item.completed', 'item': {'type': 'reasoning', 'text': 'fallback на -U3'}}], 0),
+                             ('служебное событие model_reroute — отказ', [{'type': 'warning', 'message': 'model_reroute to other'}], 2),
+                             ('вызов инструмента reviewer — отказ', [{'type': 'item.completed', 'item': {'type': 'command_execution'}}], 2)):
+        q = Proj('v15-ev')
+        q.cr('start', 'события', '--id', 'v15-ev')
+        q.commit('backend/app.py', ADD2)
+        q.script('codex', [{'text': 'VERDICT: PASS', 'events': evs}])
+        rc, _, err = q.cr('review')
+        check(f'1.5: события Codex-reviewer: {label}', rc == want and q.count('codex-review') == 1, err)
+
+    # --- E. проверка размера ядра навыка и наличия справки
+    skill = (HERE / 'SKILL.md').read_text(encoding='utf-8')
+    refs = set(re.findall(r'\b([a-z-]+\.md)\b', skill)) - {'agentq-codegen.md', 'agentq.md', 'SKILL.md'}
+    check('1.5: ядро SKILL.md ≤ 8000 символов, все упомянутые файлы справки существуют рядом',
+          len(skill) <= 8000 and refs and all((HERE / 'reference' / r).is_file() for r in refs), (len(skill), refs))
+
+
 def main():
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding='utf-8', errors='replace')
     for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_task_budget_scope, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links, t_parallel,
-              t_unavailable_and_modes, t_findings, t_context, t_timing, t_acceptance_regressions, t_model_routing, t_claude_author):
+              t_unavailable_and_modes, t_findings, t_context, t_timing, t_acceptance_regressions, t_model_routing, t_claude_author, t_v15):
         try:
             t()
         except Exception as e:  # noqa: BLE001
