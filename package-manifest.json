@@ -89,8 +89,8 @@
       "git_blob": "f5683b1af358ca61e9600f4b4547af176ca18d38"
     },
     "skills/agentq/agentq_global.py": {
-      "sha256": "94b4ea500f8e57d7e1437a9bf8439e0a0592f27c32b34ec8cc59630057769bd0",
-      "git_blob": "66ed6d81dda895e775dbfb5f1fe7a8fcd48da619"
+      "sha256": "bf449e232c9a0237ae3bb0bee25ad324c0248a01e33c1a0e02c3f50dad246c5a",
+      "git_blob": "f3eca023f85ef482541643e9a2629bf7addf9dbf"
     },
     "skills/agentq/codex-review.sh": {
       "sha256": "c78dc298bb0520f6c4c76b60133b3628d715e1db9947ed4ccb2a245a49ae4a3e",

@@ -2886,8 +2886,9 @@ def need_actionable(task, uid, n):
         v, c = u['verdict'], u['checks']
         red = bool(c and c.get('ok') is False and c.get('sha') == u['candidate'])
         # предмет исправления — только красные проверки кандидата, открытые существенные замечания либо не-PASS вердикт на этом SHA, у которого
-        # reviewer назвал хотя бы одно замечание (has_findings; вердикты прежних версий без метки — как раньше); свободный текст отчёта им не служит
-        said = bool(v and v.get('sha') == u['candidate'] and v['value'] != 'PASS' and v.get('has_findings', True))
+        # reviewer назвал хотя бы одно замечание (has_findings; вердикты прежних версий без метки — как раньше) либо UNCERTAIN самого reviewer-а; свободный текст отчёта им не служит
+        said = bool(v and v.get('sha') == u['candidate'] and v['value'] != 'PASS' and
+                    (v.get('has_findings', True) or (v['value'] == 'UNCERTAIN' and not v.get('integrity'))))   # UNCERTAIN самого reviewer-а (не вывод движка) — его пояснение и есть предмет
         need(red or open_ids(u) or said, f'{uid}: у кандидата нет ни красных проверок, ни замечаний ревью — автору нечего исправлять; вызов не сделан. '
              'Если вердикт получен, но не PASS и без замечаний, повтори ревью (review) либо разбери причину (status)')
 
