@@ -3719,11 +3719,125 @@ def t_v15():
           len(skill) <= 8000 and refs and all((HERE / 'reference' / r).is_file() for r in refs), (len(skill), refs))
 
 
+def t_v151():
+    """1.5.1: A-2 (текст автора не меняет вердикт; FIX без замечаний невозможен), A-1 (пустая единица-заготовка не мешает приёмке),
+    A-3/A-4 (причины вызовов после обрыва и после нового кандидата), стабильность префикса промпта автора."""
+    # --- A-2: зелёный кандидат + PASS reviewer'а + «не могу запустить тесты» в unmet_requirements = принято, без лишних вызовов
+    a = Proj('v151-a2')
+    a.cr('start', 'A-2', '--id', 'v151-a2', '--kind', 'mixed', '--contract-file', a.contract())
+    a.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    a.script('codex', [{'files': FILES_OK1, 'unmet': ['Без инструментов невозможно запустить тесты и подтвердить прохождение существующих проверок.']}])
+    a.script('claude', [OK])
+    rc, out, err = a.cr('cycle', 'fe')
+    check('1.5.1 A-2: PASS reviewer-а + фраза автора «невозможно запустить тесты» = принято, 1 вызов автора и 1 ревью',
+          rc == 0 and a.count('codex-author') == 1 and a.count('claude-review') == 1 and rstate(a)['units']['fe']['status'] == 'accepted', out + err)
+    rc, out, err = a.cr('integrate', 'fe')
+    rc2, out2, _ = a.cr('finish')
+    check('1.5.1 A-2: integrate и finish проходят (ACCEPTANCE: VERIFIED), текст автора остался справкой в журнале',
+          rc == 0 and rc2 == 0 and 'ACCEPTANCE: VERIFIED' in out2, out + err + out2)
+    p0 = (a.fake / 'codex-prompt-0.txt').read_text(encoding='utf-8')
+    check('1.5.1 A-2: в промпте Codex-автора — «проверки запускает движок, сам команды не запускай и об этом не пиши»',
+          'Проверки (тесты, линтеры) запускает движок: сам команды не запускай и об этом не пиши' in p0, p0[:900])
+
+    # --- A-2: FIX без единого замечания и без красных проверок невозможен: UNCERTAIN, повтор ревью того же SHA (причина integrity), автор не вызывается
+    b = Proj('v151-fix0')
+    b.cr('start', 'FIX без замечаний', '--id', 'v151-fix0', '--kind', 'mixed', '--contract-file', b.contract())
+    b.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    b.script('codex', [{'files': FILES_OK1}, {'files': FILES_OK2}])
+    b.script('claude', [{'verdict': 'FIX', 'summary': 'не нравится', 'findings': []}, OK])
+    rc, out, err = b.cr('cycle', 'fe')
+    st = rstate(b)['units']['fe']
+    d = json.loads(b.cr('status', '--json')[1])
+    check('1.5.1 A-2: FIX без замечаний → UNCERTAIN и повтор ревью того же SHA; автор второй раз не вызывался; причина повтора — integrity',
+          rc == 0 and b.count('codex-author') == 1 and b.count('claude-review') == 2 and st['status'] == 'accepted'
+          and [c['cause'] for c in d['calls'] if c['role'] == 'review'] == ['first', 'integrity'], out + err + str(d['calls']))
+    # защита на входе автора: у кандидата нет ни красных проверок, ни замечаний — платный вызов не делается
+    state_edit(b, lambda s: s['units']['fe'].update(status='open', verdict=None, checks=None))
+    n_before = b.count('codex-author')
+    rc, _, err = b.cr('author', 'fe')
+    check('1.5.1 A-2: автору без предмета исправления вызов не делается (код 2, счётчик вызовов прежний)',
+          rc == 2 and 'нечего исправлять' in err and b.count('codex-author') == n_before, err)
+
+    # --- стабильность префикса промпта автора: номер круга и замечания только после неизменной части
+    c = Proj('v151-prefix')
+    c.cr('start', 'префикс', '--id', 'v151-prefix', '--kind', 'mixed', '--contract-file', c.contract())
+    c.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES, '--context', 'backend/app.py')
+    c.script('codex', [{'files': FILES_OK1}, {'files': FILES_OK2}])
+    c.script('claude', [FIXV, OKC1])
+    c.cr('cycle', 'fe')
+    q0, q1 = [f.read_text(encoding='utf-8') for f in codex_prompts(c)]
+    cut = 'Файлы (текущее содержимое'
+    check('1.5.1 A-5: префикс промпта автора до файлов одинаков в двух кругах; «Раунд автора» и замечания — после него',
+          q0.split(cut)[0] == q1.split(cut)[0] and 'Раунд автора' not in q0.split(cut)[0]
+          and q0.index(cut) < q0.index('Раунд автора: 1') and q1.index(cut) < q1.index('Раунд автора: 2') < q1.index('ЗАМЕЧАНИЯ ПРЕДЫДУЩЕГО КРУГА'), q0[:700])
+
+    # --- A-4: причины вызовов в цикле автор→ревью: у ревью нового кандидата — new_candidate, а не «неизвестно»
+    dd = json.loads(c.cr('status', '--json')[1])
+    check('1.5.1 A-4: причины вызовов — автор first/review_fix, ревью first/new_candidate (ни одной «неизвестно»)',
+          [x['cause'] for x in dd['calls'] if x['role'] == 'author'] == ['first', 'review_fix']
+          and [x['cause'] for x in dd['calls'] if x['role'] == 'review'] == ['first', 'new_candidate'], dd['calls'])
+
+    # --- A-1: чисто серверная задача: пустая заготовка main не мешает приёмке единицы со списком файлов
+    def server_task(label):
+        s = Proj(label)
+        s.cr('start', 'серверная', '--id', label, '--kind', 'backend')
+        s.cr('unit', 'med', '--kind', 'backend', '--files', 'backend/app.py')
+        n = s.root / 'note.txt'
+        n.write_text('добавь комментарий в backend/app.py', encoding='utf-8')
+        s.script('claude', [{'edit': {'backend/app.py': 'def add(a, b):\n    return a + b  # c\n'}, 'text': 'готово'}])
+        s.script('codex', [{'text': 'VERDICT: PASS'}])
+        return s, n
+    s, n = server_task('v151-a1')
+    rc, out, err = s.cr('cycle', 'med', '--task-file', n)
+    rc_i, out_i, err_i = s.cr('integrate', 'med')
+    rc_f, out_f, _ = s.cr('finish')
+    check('1.5.1 A-1: чисто серверная задача — единица со списком файлов принята, пустая main не учитывается: ACCEPTANCE: VERIFIED',
+          rc == 0 and rc_i == 0 and rc_f == 0 and 'ACCEPTANCE: VERIFIED' in out_f and 'не учитывается' in out_f, out + err + out_i + err_i + out_f)
+    # изменение в области main (коммит вне единицы) делает её обычной открытой единицей: непроверенный код приёмку не проходит
+    s2, n2 = server_task('v151-a1b')
+    s2.cr('cycle', 'med', '--task-file', n2)
+    s2.cr('integrate', 'med')
+    s2.commit('backend/other.py', 'X = 1\n', 'код тимлида вне единицы')
+    rc_f, out_f, _ = s2.cr('finish')
+    check('1.5.1 A-1: код тимлида вне единицы без ревью — main больше не пустая, finish: НЕ ПОДТВЕРЖДЕНА',
+          rc_f == 1 and 'НЕ ПОДТВЕРЖДЕНА' in out_f and 'не учитывается' not in out_f, out_f)
+    # единственная пустая единица не считается принятой сама по себе
+    s3 = Proj('v151-a1c')
+    s3.cr('start', 'пусто', '--id', 'v151-a1c', '--kind', 'backend')
+    rc_f, out_f, _ = s3.cr('finish')
+    check('1.5.1 A-1: единственная пустая main (без других единиц) приёмку не проходит', rc_f == 1 and 'НЕ ПОДТВЕРЖДЕНА' in out_f, out_f)
+
+    # --- A-3: после обрыва и --continues причина повтора — cli_failure, а в отчёте строка про оборванный вызов
+    r = Proj('v151-a3')
+    r.cr('start', 'обрыв', '--id', 'v151-a3')
+    r.commit('backend/app.py', 'def add(a, b):\n    return a+b\n')
+    r.script('codex', [{'sleep': 30}, {'text': 'VERDICT: PASS', 'usage': [{'input_tokens': 50, 'cached_input_tokens': 0, 'output_tokens': 4}]}])
+    rc, _, err = r.cr('review', env={'AQ_TIMEOUT': '2'})
+    r.cr('finish', '--abandon')
+    rc2, _, err2 = r.cr('start', 'обрыв', '--id', 'v151-a3b', '--continues', 'v151-a3')
+    rc3, out3, err3 = r.cr('review')
+    d3 = json.loads(r.cr('status', '--json')[1])
+    rep = r.cr('report')[1]
+    led = rledger(r)[0]
+    check('1.5.1 A-3: журнал хранит оборванный вызов и пару «единица:роль» с обрывом',
+          rc == 2 and led.get('interrupted') and led['interrupted'][0]['key'] == 'main:review:1' and led.get('open_failures') == ['main:review'], led)
+    check('1.5.1 A-3: первый вызов после --continues — причина cli_failure (не «продолжение цепочки»)',
+          rc2 == 0 and rc3 == 0 and [c['cause'] for c in d3['calls']] == ['cli_failure'], d3.get('calls') or (err2, err3))
+    check('1.5.1 A-3: report показывает оборванный вызов прежней задачи с пометкой «расход неизвестен» и не превращает его в нули',
+          'main:review:1' in rep and 'оборван' in rep and 'расход неизвестен' in rep and 'вход 50' in rep, rep)
+    # повторное продолжение: после успешного вызова той же роли метка сбоя снята
+    r.cr('finish', '--abandon')
+    r.cr('start', 'обрыв', '--id', 'v151-a3c', '--continues', 'v151-a3b')
+    led2 = [e for e in rledger(r) if e['id'] == 'v151-a3b'][0]
+    check('1.5.1 A-3: после успешного повтора метка сбоя снята — следующая задача цепочки не ссылается на старый обрыв',
+          led2.get('open_failures') == [], led2)
+
+
 def main():
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding='utf-8', errors='replace')
     for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_task_budget_scope, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links, t_parallel,
-              t_unavailable_and_modes, t_findings, t_context, t_timing, t_acceptance_regressions, t_model_routing, t_claude_author, t_v15):
+              t_unavailable_and_modes, t_findings, t_context, t_timing, t_acceptance_regressions, t_model_routing, t_claude_author, t_v15, t_v151):
         try:
             t()
         except Exception as e:  # noqa: BLE001
