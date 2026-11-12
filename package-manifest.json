@@ -73,8 +73,8 @@
       "git_blob": "60d1b412a46d37040649119db4d24ee0f3bf76d9"
     },
     "README.md": {
-      "sha256": "6532bea6e4cf857f5bf4bef05cd3c20f3ea45569d047c6d237031113cd6e63e0",
-      "git_blob": "6fa90a2401e6ab51ba86c417d3fb42c3a87c8f36"
+      "sha256": "c9e57d0394a5dc44af756a43ea01dd084367b884a2b26f2d44868a09008eef8b",
+      "git_blob": "fb3f60cc5d3689926e25bae9a76ec904dbec4029"
     },
     "scripts/install-global.sh": {
       "sha256": "54947b4161b02c7e8bcf1889bec7d17d3f989c3ffe368ee9e193a6f76a6b1470",
@@ -89,16 +89,16 @@
       "git_blob": "f5683b1af358ca61e9600f4b4547af176ca18d38"
     },
     "skills/agentq/agentq_global.py": {
-      "sha256": "5cc72b5b7d26923e6f018496bc47aced2524f070af2b5333c0f28cd18fe3cf8c",
-      "git_blob": "c14c9bb17a1f693b4a0c1411d9e8482bdaaf0877"
+      "sha256": "94b4ea500f8e57d7e1437a9bf8439e0a0592f27c32b34ec8cc59630057769bd0",
+      "git_blob": "66ed6d81dda895e775dbfb5f1fe7a8fcd48da619"
     },
     "skills/agentq/codex-review.sh": {
       "sha256": "c78dc298bb0520f6c4c76b60133b3628d715e1db9947ed4ccb2a245a49ae4a3e",
       "git_blob": "cb0ab9fbe888925f8d53cd716d714841454bb898"
     },
     "skills/agentq/reference/budget.md": {
-      "sha256": "75f94ce1554767cfe0f05a73c2a503385b77a59203b6f429d4408808bc0a074f",
-      "git_blob": "df79f47d7635ed46228f652ba7309209224bcdfa"
+      "sha256": "a11c9d5bb52135821a2d4041643b7a0da52565996ae6f4e3b8995d90c6dbe958",
+      "git_blob": "a961349ac21c544e818ead18aa8dcc9a0fa8cb90"
     },
     "skills/agentq/reference/checks.md": {
       "sha256": "519e4c7be11e6b0df6a977ede1ccce6502e48f76df6baee39ffe1af0b6227039",
@@ -121,8 +121,8 @@
       "git_blob": "c6bb69e816b9628346f0359100d455119a6600e9"
     },
     "skills/agentq/selftest.py": {
-      "sha256": "cd773e82f9c4bd8d9fe87466ab996a9f7ab0ce5d759f730d169a7f4ad6ca403a",
-      "git_blob": "830751136c07a5d0e916ff975c296a6aa33c862c"
+      "sha256": "96a627ff3cde02de5c3e37391227fdbcdcffd07ddf88854f749b316c6095b4ee",
+      "git_blob": "4795a2650946614eefec23be1b1227cec6d47ac4"
     },
     "skills/agentq/SKILL.md": {
       "sha256": "633d734534c6575397e6f44e3672286e5f97cf70410cdafd5cafb10d6c8fc5b2",

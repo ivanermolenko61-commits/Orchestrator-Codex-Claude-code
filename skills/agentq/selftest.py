@@ -3733,7 +3733,7 @@ def t_v151():
           rc == 0 and a.count('codex-author') == 1 and a.count('claude-review') == 1 and rstate(a)['units']['fe']['status'] == 'accepted', out + err)
     rc, out, err = a.cr('integrate', 'fe')
     rc2, out2, _ = a.cr('finish')
-    check('1.5.1 A-2: integrate и finish проходят (ACCEPTANCE: VERIFIED), текст автора остался справкой в журнале',
+    check('1.5.1 A-2: integrate и finish проходят (ACCEPTANCE: VERIFIED), текст автора остался справкой в состоянии задачи',
           rc == 0 and rc2 == 0 and 'ACCEPTANCE: VERIFIED' in out2, out + err + out2)
     p0 = (a.fake / 'codex-prompt-0.txt').read_text(encoding='utf-8')
     check('1.5.1 A-2: в промпте Codex-автора — «проверки запускает движок, сам команды не запускай и об этом не пиши»',
@@ -3757,6 +3757,20 @@ def t_v151():
     rc, _, err = b.cr('author', 'fe')
     check('1.5.1 A-2: автору без предмета исправления вызов не делается (код 2, счётчик вызовов прежний)',
           rc == 2 and 'нечего исправлять' in err and b.count('codex-author') == n_before, err)
+
+    # R1 приёмки: после UNCERTAIN (FIX без замечаний) отчёт не пуст, но предметом исправления не служит — автор прямой командой не вызывается
+    b2 = Proj('v151-r1')
+    b2.cr('start', 'R1', '--id', 'v151-r1', '--kind', 'mixed', '--contract-file', b2.contract())
+    b2.cr('unit', 'fe', '--kind', 'frontend', '--files', *FE_FILES)
+    b2.script('codex', [{'files': FILES_OK1}, {'files': FILES_OK2}])
+    b2.script('claude', [{'verdict': 'FIX', 'summary': 'не нравится', 'findings': []}, OK])
+    b2.cr('author', 'fe')
+    b2.cr('review', 'fe')
+    v2 = rstate(b2)['units']['fe']['verdict']
+    rc, _, err = b2.cr('author', 'fe')
+    check('1.5.1 R1: вердикт UNCERTAIN без замечаний (отчёт непуст) — прямой вызов автора заблокирован до резерва',
+          v2['value'] == 'UNCERTAIN' and v2.get('integrity') and v2.get('has_findings') is False
+          and rc == 2 and 'нечего исправлять' in err and b2.count('codex-author') == 1, (v2, err))
 
     # --- стабильность префикса промпта автора: номер круга и замечания только после неизменной части
     c = Proj('v151-prefix')
@@ -3806,6 +3820,15 @@ def t_v151():
     s3.cr('start', 'пусто', '--id', 'v151-a1c', '--kind', 'backend')
     rc_f, out_f, _ = s3.cr('finish')
     check('1.5.1 A-1: единственная пустая main (без других единиц) приёмку не проходит', rc_f == 1 and 'НЕ ПОДТВЕРЖДЕНА' in out_f, out_f)
+
+    # R2 приёмки: сбой git при проверке пустоты не исключает единицу из приёмки
+    s4, n4 = server_task('v151-a1d')
+    s4.cr('cycle', 'med', '--task-file', n4)
+    s4.cr('integrate', 'med')
+    state_edit(s4, lambda st_: st_['units']['main'].update(base='0' * 40))
+    rc_f, out_f, _ = s4.cr('finish')
+    check('1.5.1 R2: git не смог проверить область main (база недоступна) — единица не исключается, finish: НЕ ПОДТВЕРЖДЕНА',
+          rc_f == 1 and 'НЕ ПОДТВЕРЖДЕНА' in out_f and 'не учитывается' not in out_f, out_f)
 
     # --- A-3: после обрыва и --continues причина повтора — cli_failure, а в отчёте строка про оборванный вызов
     r = Proj('v151-a3')

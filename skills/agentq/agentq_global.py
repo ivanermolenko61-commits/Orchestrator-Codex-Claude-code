@@ -2743,8 +2743,10 @@ def vacuous(task, uid):
     if task.spent(uid, 'author') or task.spent(uid, 'review'):
         return False
     spec = pathspec(task, uid, hide=False)
-    return not git(task.root, 'diff', '--no-ext-diff', '--name-only', f'{u["base"]}..HEAD', '--', *spec, check=False).stdout.strip() and \
-        not git(task.root, 'status', '--porcelain', '--untracked-files=all', '--', *spec, check=False).stdout.strip()
+    runs = [git(task.root, 'diff', '--no-ext-diff', '--name-only', f'{u["base"]}..HEAD', '--', *spec, check=False),
+            git(task.root, 'status', '--porcelain', '--untracked-files=all', '--', *spec, check=False)]
+    # сбой git (например, недоступна база) — не «изменений нет»: пустой stdout при ненулевом коде единицу не исключает
+    return all(r.returncode == 0 and not r.stdout.strip() for r in runs)
 
 
 def verification(task, uid):
@@ -2881,7 +2883,12 @@ def need_actionable(task, uid, n):
     дал бы пустую правку: «FIX без замечаний» невозможен. Уже начатый вызов (восстановление) не затрагивается."""
     u = task.unit(uid)
     if u['candidate'] and f'{uid}:author:{n}' not in task.s['calls']:
-        need(feedback_for(u).strip(), f'{uid}: у кандидата нет ни красных проверок, ни замечаний ревью — автору нечего исправлять; вызов не сделан. '
+        v, c = u['verdict'], u['checks']
+        red = bool(c and c.get('ok') is False and c.get('sha') == u['candidate'])
+        # предмет исправления — только красные проверки кандидата, открытые существенные замечания либо не-PASS вердикт на этом SHA, у которого
+        # reviewer назвал хотя бы одно замечание (has_findings; вердикты прежних версий без метки — как раньше); свободный текст отчёта им не служит
+        said = bool(v and v.get('sha') == u['candidate'] and v['value'] != 'PASS' and v.get('has_findings', True))
+        need(red or open_ids(u) or said, f'{uid}: у кандидата нет ни красных проверок, ни замечаний ревью — автору нечего исправлять; вызов не сделан. '
              'Если вердикт получен, но не PASS и без замечаний, повтори ревью (review) либо разбери причину (status)')
 
 
@@ -3190,7 +3197,7 @@ def do_review(task, uid, effort, full, opts=None):
     call = task.s['calls'].get(f'{uid}:review:{n}') or {}
     ctx_meta, req_meta = call.get('context'), call.get('requirements')
     u['verdict'] = {'sha': tip, 'value': value, 'n': n, **({'context': ctx_meta} if ctx_meta else {}), **({'requirements': req_meta} if req_meta else {}),
-                    **({'integrity': True} if ap['integrity'] else {})}
+                    **({'integrity': True} if ap['integrity'] else {}), 'has_findings': bool(structured or open_ids(u))}
     u['reviewed'], u['last_report'], u['review_applied'] = tip, str(out), n
     note = ''
     last = u['rounds'][-1] if u['rounds'] else {}
