@@ -183,6 +183,12 @@ if a[:1] == ['run']:
                 sys.stdout.write('x' * 50000 + chr(10))
         if q.is_file() and ('FAIL_' + cmd[0]) in q.read_text(encoding='utf-8', errors='replace'):
             print('FAILED ' + cmd[0] + ': ' + q.name); sys.exit(1)
+    full = any(('discover' in c) or ('*' in c) for c in cmd)   # полный прогон (discover / маска) или выборка (1.6.0)
+    for q in src.rglob('*'):
+        if q.is_file():
+            txt = q.read_text(encoding='utf-8', errors='replace')
+            if ('FAIL_FULLRUN' in txt and full) or ('FAIL_SELECTED' in txt and not full):
+                print('FAILED ' + ('full' if full else 'selected') + ': ' + q.name); sys.exit(1)
     print('ok ' + cmd[0]); sys.exit(0)
 sys.exit(2)
 """
@@ -3856,11 +3862,217 @@ def t_v151():
           led2.get('open_failures') == [], led2)
 
 
+# ---------------------------------------------------------------- 1.6.0: быстрые проверки, авто-контекст, быстрый режим
+
+PCFG = {'checks': {'backend': [['python', '-B', '-m', 'unittest', 'discover', '-s', 'tests', '-v']],
+                   'frontend': [['node', '--test', 'web/tests/*.test.mjs']]}, 'check_image': 'aq-fake:1'}
+PY_EXTRA = {'calc/__init__.py': '', 'calc/stats.py': 'def mean(x):\n    return sum(x) / len(x)\n', 'calc/util.py': 'def clamp(x):\n    return x\n',
+            **{f'tests/test_{n}.py': 'import unittest\n' + ('from calc import stats\n' if n == 'stats' else 'from calc import util\n' if n == 'util' else '') +
+               f'class T(unittest.TestCase):\n    def test_a(self):\n        self.assertTrue(True)\n' for n in ('stats', 'util', 'o1', 'o2', 'o3', 'o4')}}
+JS_EXTRA = {'web/units.js': '// Склонение. Порядок аргументов: сначала набор форм, потом число.\nexport function pluralRu(forms, n) {\n  return forms.many;\n}\n',
+            'web/format.js': 'export function fmt(x) {\n  return String(x);\n}\n',
+            **{f'web/tests/{n}.test.mjs': ('import { fmt } from "../format.js";\n' if n == 'fmt' else '') + "import test from 'node:test';\ntest('a', () => {});\n"
+               for n in ('fmt', 'o1', 'o2', 'o3', 'o4', 'o5')}}
+SUM_JS = "import { pluralRu } from './units.js';\nexport function describeCount(n) {\n  return n + ' ' + pluralRu({one: 'a', few: 'b', many: 'c'}, n);\n}\n"
+SUM_T = "import test from 'node:test';\nimport { describeCount } from '../summary.js';\ntest('s', () => { describeCount(1); });\n"
+SUM_FILES = ['web/summary.js', 'web/tests/summary.test.mjs']
+
+
+def pdocker(p):
+    """Команды контейнера по порядку: (выборка | полный прогон, строка)."""
+    out = []
+    for l in docker_runs(p):
+        tail = l.split(' aqrun ')[-1]
+        out.append(('full' if ('discover' in tail or '*' in tail) else 'partial', tail))
+    return out
+
+
+def t_v160():
+    eng = load_engine()
+    # --- B2: выборка строится по БАЗЕ; зелёная выборка не подтверждает SHA; ровно один полный прогон; reviewer видит «частичные проверки»
+    p = Proj('v160-be', extra=PY_EXTRA, config=PCFG)
+    p.cr('start', 'выборка backend', '--id', 'v160-be', '--kind', 'backend')
+    p.commit('calc/stats.py', 'def mean(x):\n    return sum(x) / len(x)  # правка\n')
+    p.script('codex', [{'text': 'VERDICT: PASS'}])
+    rc, out, err = p.cr('review')
+    runs = pdocker(p)
+    prompt = (p.fake / 'codex-prompt-0.txt').read_text(encoding='utf-8')
+    check('1.6.0 B2: правка одного модуля — выборка (только тест-потребитель), затем PASS и ОДИН полный прогон',
+          rc == 0 and [k for k, _ in runs] == ['partial', 'full'] and 'test_stats' in runs[0][1] and 'test_util' not in runs[0][1], (out, err, runs))
+    check('1.6.0 B2: reviewer видит «частичные проверки», а не зелёные проверки SHA',
+          'ЧАСТИЧНЫЕ проверки' in prompt and 'НЕ проверка всего SHA' in prompt and 'Фактические проверки на этом SHA' not in prompt, prompt[-1500:])
+    rc, out, _ = p.cr('finish')
+    check('1.6.0 B2: finish подтверждает приёмку только по полному прогону (VERIFIED), прогонов не добавилось',
+          rc == 0 and 'ACCEPTANCE: VERIFIED' in out and len(docker_runs(p)) == 2, out)
+    # --- красная выборка → красные проверки без ревью, сверка с базой (тесты на базе были)
+    q = Proj('v160-red', extra=PY_EXTRA, config=PCFG)
+    q.cr('start', 'красная выборка', '--id', 'v160-red', '--kind', 'backend')
+    q.commit('calc/stats.py', 'def mean(x):\n    return 0  # FAIL_env\n')
+    q.script('codex', [{'text': 'VERDICT: PASS'}])
+    rc, out, err = q.cr('review')
+    runs = pdocker(q)
+    check('1.6.0 B2: красная выборка = красные проверки: модель не вызывалась, полный прогон не запускался, красный сверен с базой',
+          rc == 1 and 'ПРОВЕРКИ НЕ ПРОШЛИ' in out and q.count('codex-review') == 0 and [k for k, _ in runs] == ['partial', 'partial'], (out, err, runs))
+    # --- partial_miss: выборка зелёная, полный красный → красный круг, PASS не засчитан
+    m = Proj('v160-miss', extra=PY_EXTRA, config=PCFG)
+    m.cr('start', 'пропуск выборкой', '--id', 'v160-miss', '--kind', 'backend')
+    m.commit('calc/stats.py', 'def mean(x):\n    return 1  # FAIL_python\n')
+    m.script('codex', [{'text': 'VERDICT: PASS'}])
+    rc, out, err = m.cr('review')
+    st = rstate(m)['units']['main']
+    check('1.6.0 B2/п.5: выборка зелёная, полный красный → PASS не засчитан, красные проверки с причиной partial_miss',
+          rc == 1 and 'partial_miss' in out and st['checks']['ok'] is False and st['checks'].get('cause') == 'partial_miss', (out, err, st['checks']))
+    rc2, out2, _ = m.cr('review')
+    check('1.6.0 B2: повторное review того же SHA с вердиктом PASS не обходит красный полный прогон', rc2 == 1 and m.count('codex-review') == 1, out2)
+    rc, _, _ = m.cr('finish')
+    check('1.6.0 B2: finish при красном полном прогоне не подтверждает приёмку', 'ACCEPTANCE: VERIFIED' not in m.cr('finish')[1], '')
+    # --- выключатель и неприменимые случаи: поведение 1.5.1 (полный прогон на кандидате)
+    z = Proj('v160-off', extra=PY_EXTRA, config=PCFG)
+    z.cr('start', 'без выборки', '--id', 'v160-off', '--kind', 'backend')
+    z.commit('calc/stats.py', 'def mean(x):\n    return 1\n')
+    z.script('codex', [{'text': 'VERDICT: PASS'}])
+    rc, out, _ = z.cr('review', env={'AGENTQ_PARTIAL': '0'})
+    check('1.6.0: AGENTQ_PARTIAL=0 — поведение 1.5.1: один полный прогон до ревью, выборки нет', rc == 0 and [k for k, _ in pdocker(z)] == ['full'], pdocker(z))
+    n = Proj('v160-cfg', extra={**PY_EXTRA, 'README.md': 'x\n'}, config=PCFG)
+    n.cr('start', 'не код', '--id', 'v160-cfg', '--kind', 'backend')
+    n.commit('README.md', 'y\n')
+    n.script('codex', [{'text': 'VERDICT: PASS'}])
+    rc, out, _ = n.cr('review')
+    check('1.6.0 B2: изменение вне кода — выборки нет, один полный прогон; причина записана в check_runs',
+          rc == 0 and [k for k, _ in pdocker(n)] == ['full'] and any(r['kind'] == 'full-only' for r in rstate(n)['units']['main']['check_runs']), (pdocker(n), rstate(n)['units']['main']['check_runs']))
+    # покрытие ≥80% тестов — выборка не делается
+    w = Proj('v160-wide', extra={**PY_EXTRA, 'calc/stats.py': 'def mean(x):\n    return 0\n',
+                                 **{f'tests/test_{k}.py': 'import unittest\nfrom calc import stats\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n' for k in ('o1', 'o2', 'o3', 'o4')}}, config=PCFG)
+    w.cr('start', 'почти всё', '--id', 'v160-wide', '--kind', 'backend')
+    w.commit('calc/stats.py', 'def mean(x):\n    return 1\n')
+    w.script('codex', [{'text': 'VERDICT: PASS'}])
+    rc, out, _ = w.cr('review')
+    check('1.6.0 B2: выборка ≥80% тестов не экономит — сразу один полный прогон', rc == 0 and [k for k, _ in pdocker(w)] == ['full'], pdocker(w))
+
+    # --- карта строится по базе, а не по кандидату (чистая функция)
+    g = Proj('v160-map', extra={'calc/__init__.py': '', 'calc/a.py': 'X = 1\n', 'calc/b.py': 'Y = 1\n',
+                                 **{f'tests/test_{k}.py': 'import unittest\n' + ('from calc import a\n' if k == 'x' else '') + 'class T(unittest.TestCase):\n    def test_a(self):\n        pass\n'
+                                    for k in ('x', 'o1', 'o2', 'o3', 'o4', 'o5')}}, config=PCFG)
+    base = g.git('rev-parse', 'HEAD')
+    g.commit('calc/b.py', 'Y = 2\n', 'b')
+    g.commit('calc/a.py', 'import calc.b\nX = 1\n', 'a импортирует b (только в кандидате)')
+    tip = g.git('rev-parse', 'HEAD')
+    plan, why = eng.selection_plan(g.repo, 'backend', base, tip, PCFG['checks']['backend'])
+    check('1.6.0 B2/п.4: импорт, добавленный кандидатом, карту не меняет (b без теста-потребителя на базе → полный прогон)', plan is None and 'calc/b.py' in why, (plan, why))
+    plan2, why2 = eng.selection_plan(g.repo, 'backend', base, g.git('rev-parse', 'HEAD~1'), PCFG['checks']['backend'])
+    check('1.6.0 B2: файл без потребителя-теста на базе → полный прогон; удаление → полный прогон',
+          plan2 is None and 'нет теста' in why2, (plan2, why2))
+
+    # --- B1: авто-контекст (frontend, S3-образец): порядок источников, лимиты, запреты, context_meta
+    f = Proj('v160-fe', extra=JS_EXTRA, config=PCFG)
+    f.cr('start', 'авто-контекст', '--id', 'v160-fe', '--kind', 'mixed', '--contract-file', f.contract())
+    f.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)
+    f.script('codex', [{'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T}}])
+    f.script('claude', [OK])
+    rc, out, err = f.cr('cycle', 'fe')
+    ap = (f.fake / 'codex-prompt-0.txt').read_text(encoding='utf-8')
+    call = rstate(f)['calls']['fe:author:1']
+    ac = {e['path']: e for e in call.get('auto_context', [])}
+    check('1.6.0 B1: автору Codex в запрос добавлены подписи без тел из каталога единицы (pluralRu виден, тело нет)',
+          rc == 0 and 'автоконтекст' in ap and 'export function pluralRu(forms, n)' in ap and 'return forms.many' not in ap, (out, err, ap[-1200:]))
+    check('1.6.0 B1: context_meta вызова автора хранит путь, sha256, источник и режим «подпись»; соседний файл — источник siblings',
+          'web/units.js' in ac and 'siblings' in ac['web/units.js']['sources'] and ac['web/units.js']['mode'] == 'signature' and len(ac['web/units.js']['sha256']) == 64
+          and all(e['path'] != 'web/summary.js' for e in ac.values()), call.get('auto_context'))
+    check('1.6.0 B1: файлы единицы и тесты не попадают в авто-контекст', not any(e['path'].startswith('web/tests/') for e in ac.values()), list(ac))
+    # источники и порядок (чистая функция): imports → named → siblings → importers; лимиты; запреты
+    h = Proj('v160-ctx', extra={'src/core.py': 'import helper\n\ndef run(x):\n    """Главная."""\n    return helper.go(x)\n', 'src/helper.py': 'def go(x):\n    return x\n',
+                                 'src/named.py': 'def nm():\n    pass\n', 'src/side.py': 'def sd():\n    pass\n', 'app/caller.py': 'from src import core\n\ndef call():\n    return core.run(1)\n',
+                                 'src/a_secret.py': 'KEY = "sk-' + 'a' * 30 + '"\n\ndef leak():\n    pass\n',
+                                 **{f'src/many{i}.py': f'def f{i}():\n    pass\n' for i in range(9)}}, config=PCFG)
+    mod, rules = eng.load_rules(h.repo)
+    base = h.git('rev-parse', 'HEAD')
+    res = eng.auto_context(h.repo, base, ['src/core.py'], ['используй src/named.py'], [], mod, rules)
+    paths = [e['path'] for e in res]
+    check('1.6.0 B1/п.3: порядок источников — зависимости единицы (imports) первыми, названные пути следом, вызывающие последними',
+          paths[0] == 'src/helper.py' and res[0]['sources'] == ['imports', 'siblings'] and paths[1] == 'src/named.py' and 'named' in res[1]['sources'] and 'app/caller.py' not in paths[:5], [(e['path'], e['sources']) for e in res])
+    check('1.6.0 B1: не больше 6 файлов и 8 КБ; файл с похожим на секрет не передаётся',
+          len(res) <= 6 and sum(len(e['text'].encode('utf-8')) for e in res) <= 8000 and 'src/a_secret.py' not in paths, paths)
+    res2 = eng.auto_context(h.repo, base, ['src/core.py'], [], ['src/helper.py'], mod, rules)
+    check('1.6.0 B1: файлы ручного --context авто-контекстом не дублируются', 'src/helper.py' not in [e['path'] for e in res2], [e['path'] for e in res2])
+    onlyimp = eng.auto_context(h.repo, base, ['src/side.py'], [], [], mod, rules)
+    check('1.6.0 B1/п.3: вызывающий файл попадает в авто-контекст, но после зависимостей и соседей',
+          'app/caller.py' not in [e['path'] for e in eng.auto_context(h.repo, base, ['src/core.py'], [], [], mod, rules)][:3], [e['path'] for e in onlyimp])
+    eng.AUTO_ON = False
+    none = eng.auto_context(h.repo, base, ['src/core.py'], [], [], mod, rules)
+    eng.AUTO_ON = True
+    check('1.6.0 B1: AGENTQ_AUTOCTX=0 отключает авто-контекст', none == [], none)
+
+    # --- пути выборки в цикле frontend: красная выборка → автору; partial_miss → причина вызова; быстрый режим
+    c = Proj('v160-cyc', extra=JS_EXTRA, config=PCFG)
+    c.cr('start', 'цикл выборки', '--id', 'v160-cyc', '--kind', 'mixed', '--contract-file', c.contract())
+    c.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)
+    c.script('codex', [{'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T + '// FAIL_SELECTED\n'}}, {'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T}}])
+    c.script('claude', [OK])
+    rc, out, err = c.cr('cycle', 'fe')
+    runs = pdocker(c)
+    sec = (c.fake / 'codex-prompt-1.txt').read_text(encoding='utf-8')
+    check('1.6.0 B2: красная выборка возвращается автору (ревью не тратилось), затем зелёная выборка → ревью → один полный прогон',
+          rc == 0 and [k for k, _ in runs] == ['partial', 'partial', 'full'] and c.count('claude-review') == 1 and 'частичные проверки' in sec, (out, err, runs))
+
+    e = Proj('v160-miss-fe', extra=JS_EXTRA, config=PCFG)
+    e.cr('start', 'partial_miss frontend', '--id', 'v160-m', '--kind', 'mixed', '--contract-file', e.contract())
+    e.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)
+    e.script('codex', [{'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T + '// FAIL_FULLRUN\n'}}, {'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T}}])
+    e.script('claude', [OK, OK])
+    rc, out, err = e.cr('cycle', 'fe')
+    st = rstate(e)
+    causes = [st['calls'][k]['cause'] for k in sorted(st['calls']) if k.startswith('fe:author')]
+    check('1.6.0 B2/п.5: полный прогон красный после зелёной выборки → второй вызов автора с причиной partial_miss; затем принято',
+          rc == 0 and causes == ['first', 'partial_miss'] and e.count('claude-review') == 2, (out, err, causes))
+    rep = e.cr('report')[1]
+    check('1.6.0 B0/B2/п.5: report показывает частоту partial_miss, число выборок/полных прогонов и время экспорта/контейнеров',
+          'проверки fe:' in rep and 'partial_miss' in rep and 'выборок 2' in rep and 'полных прогонов 2' in rep and 'экспорт' in rep and 'контейнеры' in rep, rep)
+
+    # --- B3: быстрый режим
+    s = Proj('v160-fast', extra=JS_EXTRA, config=PCFG)
+    s.cr('start', 'быстрый режим', '--id', 'v160-f', '--kind', 'mixed', '--contract-file', s.contract())
+    s.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)
+    s.script('codex', [{'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T + '// FAIL_FULLRUN\n'}, }, {'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T}}])
+    s.script('claude', [OK, OK])
+    rc, out, err = s.cr('cycle', 'fe', '--fast')
+    st = rstate(s)
+    causes = [st['calls'][k]['cause'] for k in sorted(st['calls']) if k.startswith('fe:author')]
+    check('1.6.0 B3: --fast: красный полный прогон отбрасывает вердикт PASS (причина fast_discarded у следующего вызова автора), затем принято',
+          rc == 0 and causes == ['first', 'fast_discarded'] and 'fast_discarded' in out and s.count('claude-review') == 2, (out, err, causes))
+    check('1.6.0 B3: --fast — на каждом кандидате с зелёной выборкой запускается полный прогон параллельно ревью (2 выборки; полных 3: два кандидата + база красного)',
+          [k for k, _ in pdocker(s)].count('full') == 3 and [k for k, _ in pdocker(s)].count('partial') == 2, pdocker(s))
+    s2 = Proj('v160-fast-ok', extra=JS_EXTRA, config=PCFG)
+    s2.cr('start', 'быстрый режим зелёный', '--id', 'v160-g', '--kind', 'mixed', '--contract-file', s2.contract())
+    s2.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)
+    s2.script('codex', [{'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T}}])
+    s2.script('claude', [OK])
+    rc, out, err = s2.cr('cycle', 'fe', '--fast')
+    s2.cr('integrate', 'fe')
+    rc2, out2, _ = s2.cr('finish')
+    check('1.6.0 B3: --fast с зелёными проверками: PASS засчитан, ровно один полный прогон, приёмка VERIFIED',
+          rc == 0 and [k for k, _ in pdocker(s2)] == ['partial', 'full'] and 'ACCEPTANCE: VERIFIED' in out2, (out, err, pdocker(s2), out2))
+    s4 = Proj('v160-fast-fail', extra=JS_EXTRA, config=PCFG)
+    s4.cr('start', 'быстрый режим, сбой ревью', '--id', 'v160-i', '--kind', 'mixed', '--contract-file', s4.contract())
+    s4.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)
+    s4.script('codex', [{'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T}}])
+    s4.script('claude', [{'exit': 1, 'text': 'сбой'}])
+    rc, out, err = s4.cr('cycle', 'fe', '--fast')
+    check('1.6.0 B3: --fast, сбой ревью: команда завершается блокером (2), фоновый полный прогон дождан (не осиротел), принятой единицы нет',
+          rc == 2 and [k for k, _ in pdocker(s4)] == ['partial', 'full'] and rstate(s4)['units']['fe']['status'] != 'accepted', (rc, out, err, pdocker(s4)))
+    s3 = Proj('v160-nofast', extra=JS_EXTRA, config=PCFG)
+    s3.cr('start', 'без флага', '--id', 'v160-h', '--kind', 'mixed', '--contract-file', s3.contract())
+    s3.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)
+    s3.script('codex', [{'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T}}])
+    s3.script('claude', [OK])
+    s3.cr('cycle', 'fe')
+    check('1.6.0 B3: без --fast полный прогон идёт ПОСЛЕ ревью (порядок: выборка, полный)', [k for k, _ in pdocker(s3)] == ['partial', 'full'] and s3.count('claude-review') == 1, pdocker(s3))
+
+
 def main():
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding='utf-8', errors='replace')
     for t in (t_route, t_backend, t_role_rules, t_frontend_cycle, t_limits_recovery, t_hidden_paths_and_budget, t_budget_units_chain, t_task_budget_scope, t_progress_policy, t_cont_a, t_cont_g, t_cont_f, t_cont_c, t_cont_h, t_cont_i, t_engine_recovery, t_author_validation, t_mixed, t_review_fixes, t_links, t_parallel,
-              t_unavailable_and_modes, t_findings, t_context, t_timing, t_acceptance_regressions, t_model_routing, t_claude_author, t_v15, t_v151):
+              t_unavailable_and_modes, t_findings, t_context, t_timing, t_acceptance_regressions, t_model_routing, t_claude_author, t_v15, t_v151, t_v160):
         try:
             t()
         except Exception as e:  # noqa: BLE001
