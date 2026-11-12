@@ -183,7 +183,7 @@ if a[:1] == ['run']:
                 sys.stdout.write('x' * 50000 + chr(10))
         if q.is_file() and ('FAIL_' + cmd[0]) in q.read_text(encoding='utf-8', errors='replace'):
             print('FAILED ' + cmd[0] + ': ' + q.name); sys.exit(1)
-    full = any(('discover' in c) or ('*' in c) for c in cmd)   # полный прогон (discover / маска) или выборка (1.6.0)
+    full = cmd[0] in ('python', 'python3') or any('*' in c for c in cmd)   # полный прогон (python discover / маска node) или выборка (sh -c … -p имя / node файлы), 1.6.0
     for q in src.rglob('*'):
         if q.is_file():
             txt = q.read_text(encoding='utf-8', errors='replace')
@@ -3883,7 +3883,7 @@ def pdocker(p):
     out = []
     for l in docker_runs(p):
         tail = l.split(' aqrun ')[-1]
-        out.append(('full' if ('discover' in tail or '*' in tail) else 'partial', tail))
+        out.append(('partial' if (tail.startswith('sh -c') or (tail.startswith('node') and '*' not in tail)) else 'full', tail))
     return out
 
 
@@ -3898,7 +3898,8 @@ def t_v160():
     runs = pdocker(p)
     prompt = (p.fake / 'codex-prompt-0.txt').read_text(encoding='utf-8')
     check('1.6.0 B2: правка одного модуля — выборка (только тест-потребитель), затем PASS и ОДИН полный прогон',
-          rc == 0 and [k for k, _ in runs] == ['partial', 'full'] and 'test_stats' in runs[0][1] and 'test_util' not in runs[0][1], (out, err, runs))
+          rc == 0 and [k for k, _ in runs] == ['partial', 'full'] and 'test_stats' in runs[0][1] and 'test_util' not in runs[0][1]
+          and 'discover -s tests' in runs[0][1] and '-p "$f"' in runs[0][1] and 'PYTHONPATH' not in runs[0][1], (out, err, runs))
     check('1.6.0 B2: reviewer видит «частичные проверки», а не зелёные проверки SHA',
           'ЧАСТИЧНЫЕ проверки' in prompt and 'НЕ проверка всего SHA' in prompt and 'Фактические проверки на этом SHA' not in prompt, prompt[-1500:])
     rc, out, _ = p.cr('finish')
@@ -3907,7 +3908,7 @@ def t_v160():
     # --- красная выборка → красные проверки без ревью, сверка с базой (тесты на базе были)
     q = Proj('v160-red', extra=PY_EXTRA, config=PCFG)
     q.cr('start', 'красная выборка', '--id', 'v160-red', '--kind', 'backend')
-    q.commit('calc/stats.py', 'def mean(x):\n    return 0  # FAIL_env\n')
+    q.commit('calc/stats.py', 'def mean(x):\n    return 0  # FAIL_sh\n')
     q.script('codex', [{'text': 'VERDICT: PASS'}])
     rc, out, err = q.cr('review')
     runs = pdocker(q)
@@ -4059,6 +4060,129 @@ def t_v160():
     rc, out, err = s4.cr('cycle', 'fe', '--fast')
     check('1.6.0 B3: --fast, сбой ревью: команда завершается блокером (2), фоновый полный прогон дождан (не осиротел), принятой единицы нет',
           rc == 2 and [k for k, _ in pdocker(s4)] == ['partial', 'full'] and rstate(s4)['units']['fe']['status'] != 'accepted', (rc, out, err, pdocker(s4)))
+    # --- замечания приёмки Codex, круг 1 (R1–R11)
+    # R1: зелёная выборка после красного ПОЛНОГО прогона не засчитывается как прогресс; остановка по кругам без прогресса работает
+    r1 = Proj('v160-r1', extra=JS_EXTRA, config=PCFG)
+    r1.cr('start', 'ложный прогресс', '--id', 'v160-r1', '--kind', 'mixed', '--contract-file', r1.contract())
+    r1.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)
+    r1.script('codex', [{'files': {SUM_FILES[0]: SUM_JS + f'// {i}\n', SUM_FILES[1]: SUM_T + '// FAIL_FULLRUN\n'}} for i in range(5)])
+    r1.script('claude', [OK] * 5)
+    rc, out, err = r1.cr('cycle', 'fe')
+    rounds = rstate(r1)['units']['fe']['rounds']
+    check('1.6.0 R1: зелёные выборки между красными полными прогонами не сбрасывают остановку (нет «прогресса» по выборке), цикл останавливается (3)',
+          rc == 3 and not any(r.get('progress') for r in rounds) and len(rounds) >= 2, (rc, out[-300:], err[-300:], rounds))
+    # R1б: исправление подтверждено только зелёным полным прогоном → прогресс засчитан
+    r1b = Proj('v160-r1b', extra=JS_EXTRA, config=PCFG)
+    r1b.cr('start', 'подтверждённый прогресс', '--id', 'v160-r1b', '--kind', 'mixed', '--contract-file', r1b.contract())
+    r1b.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)
+    r1b.script('codex', [{'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T + '// FAIL_FULLRUN\n'}}, {'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T}}])
+    r1b.script('claude', [OK, OK])
+    rc, out, err = r1b.cr('cycle', 'fe')
+    rounds = rstate(r1b)['units']['fe']['rounds']
+    check('1.6.0 R1: красный полный прогон исправлен → прогресс засчитан только по зелёному ПОЛНОМУ прогону',
+          rc == 0 and any(r.get('progress') and 'полным прогоном' in (r.get('why') or '') for r in rounds), (rc, rounds))
+
+    # R2: любой выход после старта фонового прогона дожидается потока (в том числе исключение до ревью)
+    class FakeTh:
+        joined = False
+
+        def join(self):
+            FakeTh.joined = True
+
+    class FakeFast:
+        th = FakeTh()
+    orig = eng._do_review
+
+    def boom(task, uid, effort, full, opts, holder):
+        holder['fast'] = FakeFast()
+        raise RuntimeError('сбой после старта фонового прогона')
+    eng._do_review = boom
+    try:
+        try:
+            eng.do_review(None, 'x', None, False)
+        except RuntimeError:
+            pass
+    finally:
+        eng._do_review = orig
+    check('1.6.0 R2: исключение после старта фонового полного прогона — поток дождан, исключение не потеряно', FakeTh.joined)
+
+    # R3/R4/R5/R6: выборка не подменяется корневым тестом, видит вложенные пакеты, не работает по неполной карте, защищает любой каталог тестов
+    ok_t = 'import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n'
+    base_files = {'calc/__init__.py': '', 'calc/stats.py': 'X = 1\n', 'test_stats.py': 'import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.fail("корневой")\n',
+                  'tests/__init__.py': '', 'tests/sub/__init__.py': '',
+                  'tests/test_stats.py': 'import unittest\nfrom calc import stats\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n',
+                  'tests/sub/test_edge.py': 'import unittest\nfrom calc import stats\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n',
+                  **{f'tests/test_o{i}.py': ok_t for i in range(8)}}
+    g3 = Proj('v160-r3', extra=base_files, config=PCFG)
+    b3 = g3.git('rev-parse', 'HEAD')
+    g3.commit('calc/stats.py', 'X = 2\n')
+    plan, why = eng.selection_plan(g3.repo, 'backend', b3, g3.git('rev-parse', 'HEAD'), PCFG['checks']['backend'])
+    script = plan['cmd'][2] if plan else ''
+    check('1.6.0 R3: выборка запускается тем же discover -s tests -p ИМЯ (не python -m unittest ИМЯ с корнем репозитория в sys.path)',
+          plan is not None and plan['cmd'][:2] == ['sh', '-c'] and 'discover -s tests' in script and '-p "$f"' in script and 'PYTHONPATH' not in script, (plan, why))
+    check('1.6.0 R4: вложенный тестовый пакет (tests/sub/__init__.py) входит в выборку вместе с непосредственным потребителем',
+          plan is not None and 'tests/sub/test_edge.py' in plan['selected'] and 'tests/test_stats.py' in plan['selected'], plan)
+    big = 'import unittest\nfrom calc import stats\n# ' + 'x' * 210000 + '\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n'
+    g5 = Proj('v160-r5', extra={**base_files, 'tests/test_big.py': big}, config=PCFG)
+    b5 = g5.git('rev-parse', 'HEAD')
+    g5.commit('calc/stats.py', 'X = 2\n')
+    plan5, why5 = eng.selection_plan(g5.repo, 'backend', b5, g5.git('rev-parse', 'HEAD'), PCFG['checks']['backend'])
+    check('1.6.0 R5: файл больше лимита карты (не прочитан) — карта неполна, выборки нет (полный прогон)', plan5 is None and 'неполна' in why5, (plan5, why5))
+    qcfg = {**PCFG, 'checks': {**PCFG['checks'], 'backend': [['python', '-B', '-m', 'unittest', 'discover', '-s', 'qa', '-v']]}}
+    qfiles = {'calc/__init__.py': '', 'calc/stats.py': 'X = 1\n', 'qa/__init__.py': '', 'qa/fixtures.py': 'DATA = 1\n',
+              'qa/test_a.py': 'import unittest\nfrom qa import fixtures\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n',
+              **{f'qa/test_o{i}.py': ok_t for i in range(8)}}
+    g6 = Proj('v160-r6', extra=qfiles, config=qcfg)
+    b6 = g6.git('rev-parse', 'HEAD')
+    g6.commit('qa/fixtures.py', 'DATA = 2\n')
+    plan6, why6 = eng.selection_plan(g6.repo, 'backend', b6, g6.git('rev-parse', 'HEAD'), qcfg['checks']['backend'])
+    check('1.6.0 R6: вспомогательный файл каталога тестов (любое имя каталога, не только tests) — полный прогон', plan6 is None and 'вспомогательный' in why6, (plan6, why6))
+    ncfg = {**PCFG, 'checks': {**PCFG['checks'], 'frontend': [['node', '--test', 'web/tests/*.test.mjs', 'web/e2e/*.test.mjs']]}}
+    g6b = Proj('v160-r6b', extra={**JS_EXTRA, 'web/e2e/helper.js': 'export const h = 1;\n', 'web/e2e/x.test.mjs': "import test from 'node:test';\ntest('x', () => {});\n"}, config=ncfg)
+    b6b = g6b.git('rev-parse', 'HEAD')
+    g6b.commit('web/e2e/helper.js', 'export const h = 2;\n')
+    plan6b, why6b = eng.selection_plan(g6b.repo, 'frontend', b6b, g6b.git('rev-parse', 'HEAD'), ncfg['checks']['frontend'])
+    check('1.6.0 R6: node с несколькими каталогами тестов — вспомогательный файл любого из них даёт полный прогон', plan6b is None and 'вспомогательный' in why6b, (plan6b, why6b))
+
+    # R7: подписи без тел, включая однострочные
+    sp = eng.signatures('a.py', 'def f(x): return private_logic(x)\nclass C:\n    def m(self, y): return hidden(y)\n')
+    sj = eng.signatures('a.js', 'export function f(x) { return privateLogic(x); }\nexport const g = (a) => privateArrow(a);\nexport class K { m() { return secretBody(); } }\n')
+    check('1.6.0 R7: подписи не содержат тел однострочных функций python и js',
+          'private_logic' not in sp and 'hidden' not in sp and 'def f(x)' in sp and 'privateLogic' not in sj and 'privateArrow' not in sj
+          and 'secretBody' not in sj and 'export function f(x)' in sj, (sp, sj))
+
+    # R8: AGENTQ_PARTIAL=0 игнорирует ранее сохранённую выборку (после обрыва ревью)
+    r8 = Proj('v160-r8', extra=PY_EXTRA, config=PCFG)
+    r8.cr('start', 'выключатель после обрыва', '--id', 'v160-r8', '--kind', 'backend')
+    r8.commit('calc/stats.py', 'def mean(x):\n    return 2\n')
+    r8.script('codex', [{'text': 'VERDICT: PASS'}])
+    rc1, _, _ = r8.cr('review', env={'CODEX_BIN': json.dumps(['nonexistent-codex-bin-xyz'])})   # обрыв: выборка записана, ревью не состоялось
+    runs1 = [k for k, _ in pdocker(r8)]
+    rc2, out2, err2 = r8.cr('review', env={'AGENTQ_PARTIAL': '0'})
+    check('1.6.0 R8: AGENTQ_PARTIAL=0 после обрыва между выборкой и ревью игнорирует сохранённую выборку — перед ревью выполняется ПОЛНЫЙ прогон (порядок 1.5.1)',
+          rc1 == 2 and runs1 == ['partial'] and [k for k, _ in pdocker(r8)] == ['partial', 'full'], (rc1, rc2, pdocker(r8), out2, err2))
+
+    # R9: лимит авто-контекста — 8000 БАЙТ UTF-8
+    cyr = {f'src/c{i}.py': ''.join(f'def функция_{i}_{j}(аргумент):\n    """{"я" * 150}"""\n    return аргумент\n\n' for j in range(12)) for i in range(5)}
+    h9 = Proj('v160-r9', extra={'src/core.py': 'def run():\n    pass\n', **cyr}, config=PCFG)
+    mod9, rules9 = eng.load_rules(h9.repo)
+    res9 = eng.auto_context(h9.repo, h9.git('rev-parse', 'HEAD'), ['src/core.py'], [], [], mod9, rules9)
+    check('1.6.0 R9: суммарный размер авто-контекста по байтам UTF-8 не больше 8000 (кириллица)',
+          res9 and sum(len(e['text'].encode('utf-8')) for e in res9) <= 8000, [len(e['text'].encode('utf-8')) for e in res9])
+
+    # R10/R11: частота пропусков — по результатам проверок (сразу после review, без вызова автора); время стадий у выборки и полного прогона
+    r10 = Proj('v160-r10', extra=PY_EXTRA, config=PCFG)
+    r10.cr('start', 'частота пропусков', '--id', 'v160-r10', '--kind', 'backend')
+    r10.commit('calc/stats.py', 'def mean(x):\n    return 1  # FAIL_python\n')
+    r10.script('codex', [{'text': 'VERDICT: PASS'}])
+    r10.cr('review')
+    rep10 = r10.cr('report')[1]
+    runs10 = rstate(r10)['units']['main']['check_runs']
+    check('1.6.0 R10: report считает partial_miss по результатам проверок сразу после review (1 из 1), без следующего вызова автора',
+          'partial_miss/fast_discarded): 1 из 1' in rep10, rep10)
+    check('1.6.0 R11: время экспорта и контейнеров записано и у выборки, и у полного прогона; отчёт суммирует все прогоны',
+          all('export_s' in r and 'run_s' in r for r in runs10 if r['kind'] in ('partial', 'full')) and 'всего экспорт дерева' in rep10, (runs10, rep10))
+
     s3 = Proj('v160-nofast', extra=JS_EXTRA, config=PCFG)
     s3.cr('start', 'без флага', '--id', 'v160-h', '--kind', 'mixed', '--contract-file', s3.contract())
     s3.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)
