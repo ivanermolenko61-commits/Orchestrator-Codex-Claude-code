@@ -4183,6 +4183,55 @@ def t_v160():
     check('1.6.0 R11: время экспорта и контейнеров записано и у выборки, и у полного прогона; отчёт суммирует все прогоны',
           all('export_s' in r and 'run_s' in r for r in runs10 if r['kind'] in ('partial', 'full')) and 'всего экспорт дерева' in rep10, (runs10, rep10))
 
+    # --- замечания приёмки Codex, круг 2 (R1, R6, R7, R10, R11)
+    # R1/R10: красный полный прогон после зелёной выборки при вердикте FIX в --fast сохраняется (miss_pending и метка miss) и после перезапуска
+    f2 = Proj('v160-r1fix', extra=JS_EXTRA, config=PCFG)
+    f2.cr('start', 'сохранение при FIX', '--id', 'v160-r1f', '--kind', 'mixed', '--contract-file', f2.contract())
+    f2.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)
+    f2.script('codex', [{'files': {SUM_FILES[0]: SUM_JS, SUM_FILES[1]: SUM_T + '// FAIL_FULLRUN\n'}}])
+    f2.script('claude', [FIXV])
+    f2.cr('author', 'fe')
+    rc, out, err = f2.cr('review', 'fe', '--fast')
+    u2 = rstate(f2)['units']['fe']
+    check('1.6.0 R1/R10: --fast, вердикт FIX и красный полный прогон после зелёной выборки — miss_pending и метка miss сохранены на диск',
+          rc == 1 and u2.get('miss_pending') is True and u2['check_runs'][-1].get('miss') == 'partial_miss' and u2['open_checks'] is True, (rc, out[-300:], err[-300:], u2.get('miss_pending'), u2['check_runs']))
+    rep2 = f2.cr('report')[1]
+    check('1.6.0 R10: report после такой команды показывает пропуск выборки (1 из 1)', 'partial_miss/fast_discarded): 1 из 1' in rep2, rep2)
+
+    # R6: тесты в корне репозитория — выборка не определена (unittest -s . и маска node от корня)
+    rcfg = {**PCFG, 'checks': {**PCFG['checks'], 'backend': [['python', '-B', '-m', 'unittest', 'discover', '-s', '.', '-v']]}}
+    rfiles = {'fixtures.py': 'DATA = 1\n', 'test_a.py': 'import unittest\nimport fixtures\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n',
+              **{f'test_o{i}.py': 'import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n' for i in range(8)}}
+    g7 = Proj('v160-r6root', extra=rfiles, config=rcfg)
+    b7 = g7.git('rev-parse', 'HEAD')
+    g7.commit('fixtures.py', 'DATA = 2\n')
+    plan7, why7 = eng.selection_plan(g7.repo, 'backend', b7, g7.git('rev-parse', 'HEAD'), rcfg['checks']['backend'])
+    check('1.6.0 R6: unittest discover -s . — выборка не определена (изменённый корневой вспомогательный файл → полный прогон)', plan7 is None and 'корне' in why7, (plan7, why7))
+    n8cfg = {**PCFG, 'checks': {**PCFG['checks'], 'frontend': [['node', '--test', '*.test.mjs']]}}
+    g8 = Proj('v160-r6nroot', extra={'helper.js': 'export const h = 1;\n', 'a.test.mjs': "import { h } from './helper.js';\n",
+                                      **{f'o{i}.test.mjs': "import test from 'node:test';\n" for i in range(8)}}, config=n8cfg)
+    b8 = g8.git('rev-parse', 'HEAD')
+    g8.commit('helper.js', 'export const h = 2;\n')
+    plan8, why8 = eng.selection_plan(g8.repo, 'frontend', b8, g8.git('rev-parse', 'HEAD'), n8cfg['checks']['frontend'])
+    check('1.6.0 R6: node с маской от корня репозитория — выборка не определена', plan8 is None and 'корне' in why8, (plan8, why8))
+
+    # R7: стрелка без скобок и инициализатор поля класса — не в подписи
+    sj2 = eng.signatures('b.js', 'export const f = x => privateLogic(x);\nexport class K { x = privateField(); m() { return 1; } }\nexport default async y => hiddenAsync(y);\n')
+    check('1.6.0 R7: подпись не содержит тела стрелки без скобок и инициализаторов полей класса',
+          'privateLogic' not in sj2 and 'privateField' not in sj2 and 'hiddenAsync' not in sj2 and 'export const f = x =>' in sj2 and 'export class K' in sj2, sj2)
+
+    # R11: красная выборка, совпавшая с базой, — затраченное время остаётся в check_runs
+    pf = {**PY_EXTRA, 'tests/test_stats.py': PY_EXTRA['tests/test_stats.py'] + '# FAIL_sh\n'}
+    r11 = Proj('v160-r11', extra=pf, config=PCFG)
+    r11.cr('start', 'красная и на базе', '--id', 'v160-r11', '--kind', 'backend')
+    r11.commit('calc/stats.py', 'def mean(x):\n    return 3\n')
+    r11.script('codex', [{'text': 'VERDICT: PASS'}])
+    r11.cr('review')
+    runs11 = rstate(r11)['units']['main']['check_runs']
+    only11 = [r for r in runs11 if r['kind'] == 'full-only']
+    check('1.6.0 R11: выборка красная и на базе → полный прогон решает, а время выборки и сверки с базой записано (export_s/run_s) в check_runs',
+          only11 and 'export_s' in only11[0] and 'run_s' in only11[0] and only11[0]['why'] == 'выборка красная и на базе', runs11)
+
     s3 = Proj('v160-nofast', extra=JS_EXTRA, config=PCFG)
     s3.cr('start', 'без флага', '--id', 'v160-h', '--kind', 'mixed', '--contract-file', s3.contract())
     s3.cr('unit', 'fe', '--kind', 'frontend', '--files', *SUM_FILES)

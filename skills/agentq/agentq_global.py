@@ -2907,10 +2907,10 @@ def shape_tests(shape, names):
             rel = p[len(pre):].split('/')[:-1]
             if all(pre + '/'.join(rel[:i + 1]) + '/__init__.py' in nameset for i in range(len(rel))):
                 tests.append(p)
-        return tests, ([] if d == '.' else [d])
+        return tests, (['.'] if d == '.' else [d])
     regs = [glob_re(g) for g in shape[1]]
     tests = [p for p in names if any(r.match(p) for r in regs)]
-    dirs = sorted({os.path.dirname(re.split(r'[*?]', g)[0].rstrip('/') + '/x') for g in shape[1]} - {''})
+    dirs = sorted({os.path.dirname(re.split(r'[*?]', g)[0].rstrip('/') + '/x').lstrip('/') for g in shape[1]})   # '' — маска от корня репозитория
     return tests, dirs
 
 
@@ -2940,6 +2940,8 @@ def selection_plan(root, kind, base, tip, cmds):
     if graph is None:
         return None, 'карта неполна (слишком много или слишком больших файлов)'
     base_tests, tdirs = shape_tests(shape, names)
+    if '.' in tdirs or '' in tdirs:   # тесты лежат в корне репозитория: любой файл может быть вспомогательным для тестов — выборка не определена
+        return None, 'тесты в корне репозитория: выборка не определена'
     new_all = [p for p, s in changed.items() if s == 'A']
     new_tests = [p for p in shape_tests(shape, [*names, *new_all])[0] if p in changed and changed[p] == 'A']
     is_test = lambda p: p in base_tests or p in new_tests   # noqa: E731
@@ -3017,8 +3019,8 @@ def run_partial(root, kind, base, tip, plan):
             t4 = time.monotonic()
             brc = run_in_container(docker, image_id, bdir, plan['base_cmd'], timeout)[0]
             base_exp, base_run = t4 - t3, time.monotonic() - t4
-            if brc != 0:
-                return None
+            if brc != 0:   # красная и на базе: вердикт даёт полный прогон; затраченное время при этом учитывается
+                return {'ok': None, 'secs': round(time.monotonic() - t0, 1), 'export_s': round(t1 - t0 + base_exp, 1), 'run_s': round(t2 - t1 + base_run, 1)}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     n = len(plan['selected'])
@@ -3050,9 +3052,13 @@ def apply_partial(task, uid, tip):
         return None
     with timed(task, uid, 'checks_partial', f'partial:{tip[:12]}:{os.urandom(3).hex()}', sha=tip) as tm:
         res = run_partial(task.root, kind, u['base'], tip, plan)
-        tm['outcome'] = 'unconfirmed' if res is None else 'ok' if res['ok'] else 'fail'
+        tm['outcome'] = 'unconfirmed' if (res is None or res['ok'] is None) else 'ok' if res['ok'] else 'fail'
     if res is None:
-        u['check_runs'].append({'sha': tip[:10], 'kind': 'full-only', 'why': 'выборка красная и на базе'})
+        u['check_runs'].append({'sha': tip[:10], 'kind': 'full-only', 'why': 'выборка не выполнена (окружение)'})
+        task.save()
+        return None
+    if res['ok'] is None:
+        u['check_runs'].append({'sha': tip[:10], 'kind': 'full-only', 'why': 'выборка красная и на базе', 'export_s': res['export_s'], 'run_s': res['run_s']})
         task.save()
         return None
     u['check_runs'].append({'sha': tip[:10], 'kind': 'partial', 'ok': res['ok'], 'selected': len(res['selected']), 'total': res['total'], 'secs': res['secs'],
@@ -3194,10 +3200,12 @@ def signatures(path, text):
                     j -= 1
                 out += [x.strip()[:200] for x in lines[j:i]]
                 m = re.search(r'\)\s*(?::\s*[^={;]+)?\s*(\{|=>)', s)
-                if m:   # функция/стрелка: оставляем до закрывающей скобки параметров
-                    s = s[:m.start() + 1] + ' { … }'
-                elif re.match(r'export\s+(default\s+)?(class|interface)\b', s):
+                if re.match(r'export\s+(default\s+)?(abstract\s+)?(class|interface)\b', s):   # класс/интерфейс: тело (в том числе поля) отсекается первым
                     s = re.sub(r'\s*\{.*$', ' { … }', s)
+                elif '=>' in s:   # стрелка (с скобками и без): оставляем до стрелки
+                    s = s[:s.index('=>')].rstrip() + ' => { … }'
+                elif m:   # функция: оставляем до закрывающей скобки параметров
+                    s = s[:m.start() + 1] + ' { … }'
                 out.append(s[:240])
     return '\n'.join(out)[:AUTO_PER_FILE]
 
@@ -3823,9 +3831,11 @@ def _do_review(task, uid, effort, full, opts, holder):
         if res['ok'] is False:   # зелёная выборка пропустила красное: событие считается всегда, вердикт PASS при этом отбрасывается
             u['checks']['cause'] = 'fast_discarded' if value == 'PASS' else 'partial_miss'
             u['miss_pending'] = True
+            u['open_checks'] = True
             u['check_runs'][-1]['miss'] = u['checks']['cause']
         if res['ok'] is True:
             settle_full_green(task, uid, tip)
+        task.save()   # miss_pending и метка miss записаны и при вердикте FIX: иначе после перезапуска защита от ложного прогресса теряется
         if res['ok'] is False and value == 'PASS':   # вердикт получен для SHA, который не проходит полные проверки: отбрасывается, вызов остаётся в учёте
             u['verdict'] = None
             record_round(task, uid, tip, False, 'быстрый режим: полные проверки красные, вердикт отброшен (fast_discarded)')
