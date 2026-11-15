@@ -4220,6 +4220,11 @@ def t_v160():
     check('1.6.0 R7: подпись не содержит тела стрелки без скобок и инициализаторов полей класса',
           'privateLogic' not in sj2 and 'privateField' not in sj2 and 'hiddenAsync' not in sj2 and 'export const f = x =>' in sj2 and 'export class K' in sj2, sj2)
 
+    # N1 (круг 3): стрелка внутри тела объявления function не отключает отсечение тела
+    sj3 = eng.signatures('c.js', 'export function f() { privateStep(); return x => x; }\nexport async function g(a) { hiddenCall(a); return b => b; }\nexport const h = function (a) { return inner(a); };\n')
+    check('1.6.0 N1: стрелка внутри тела объявления function — тело в подпись не попадает',
+          'privateStep' not in sj3 and 'hiddenCall' not in sj3 and 'inner(' not in sj3 and 'export function f()' in sj3 and 'export async function g(a)' in sj3, sj3)
+
     # R11: красная выборка, совпавшая с базой, — затраченное время остаётся в check_runs
     pf = {**PY_EXTRA, 'tests/test_stats.py': PY_EXTRA['tests/test_stats.py'] + '# FAIL_sh\n'}
     r11 = Proj('v160-r11', extra=pf, config=PCFG)

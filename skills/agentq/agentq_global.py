@@ -3202,7 +3202,7 @@ def signatures(path, text):
                 m = re.search(r'\)\s*(?::\s*[^={;]+)?\s*(\{|=>)', s)
                 if re.match(r'export\s+(default\s+)?(abstract\s+)?(class|interface)\b', s):   # класс/интерфейс: тело (в том числе поля) отсекается первым
                     s = re.sub(r'\s*\{.*$', ' { … }', s)
-                elif '=>' in s:   # стрелка (с скобками и без): оставляем до стрелки
+                elif '=>' in s and not re.match(r'export\s+(default\s+)?(async\s+)?function\b', s):   # стрелка: до первой стрелки; объявление function — по скобке параметров (стрелка в его теле не в счёт)
                     s = s[:s.index('=>')].rstrip() + ' => { … }'
                 elif m:   # функция: оставляем до закрывающей скобки параметров
                     s = s[:m.start() + 1] + ' { … }'
