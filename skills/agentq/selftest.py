@@ -4243,6 +4243,13 @@ def t_v160():
         ('вердикт N1: < в значении по умолчанию', 'export function f(a = 1 < 2) { secretCall(a); }', 'export function f'),
         ('exports.name', 'exports.f = function (a) ' + body + ';', 'exports.f'),
         ('export { a, b }', 'export { a, b as c } from "./x";', 'export { a, b as c } from "./x"'),
+        ('export * as x from', 'export * as x from "./y";', 'export * as x from "./y"'),
+        ('export type { }', "export type { A, B, } from './t'; // c", 'export type { A, B } from "./t"'),
+        ('не-ASCII имя в списке', 'export { имя };', 'export { имя }'),
+        ('вердикт круга 7: число в списке', 'export {123456};', 'export'),
+        ('вердикт круга 7: число после * as', 'export * as 123456 from "./x";', 'export'),
+        ('число после as', 'export { a as 123 };', 'export'),
+        ('имя, начинающееся с цифры', 'export { a, 1b };', 'export'),
         ('вердикт N1 круг 6: export default числовой литерал', 'export default 123456;', 'export default'),
         ('вердикт N1 круг 6: export default булев литерал', 'export default true;', 'export default'),
         ('export default стрелка', 'export default (a) => secretCall(a);', 'export default'),
@@ -4251,11 +4258,16 @@ def t_v160():
         ('export default async-стрелка', 'export default async (a) => secretCall(a);', 'export default'),
     ]
     # грамматика белого списка форм вывода: каждая подпись обязана ей соответствовать, иначе тело или значение могло попасть в вывод
+    # IDENT здесь записан от правил языка независимо от кода: первый символ — буква (в т.ч. не-ASCII), _ или $, дальше ещё цифры
+    IDENT_T = r'[A-Za-z_$\u00c0-\uffff][A-Za-z0-9_$\u00c0-\uffff]*'
+    ITEM_T = IDENT_T + r'(?: as ' + IDENT_T + r')?'
+    PATH_T = '"[^"]*"'
     JS_SIGNATURE_GRAMMAR = re.compile(
-        r'export(?: default)?(?: (?:async )?function\*?| (?:function\*?|class|const|let|var|interface|type|enum|namespace))(?: [A-Za-z_$][\w$]*)?'
+        r'export(?: default)?(?: (?:async )?function\*?| (?:function\*?|class|const|let|var|interface|type|enum|namespace))(?: ' + IDENT_T + r')?'
         r'|export(?: default)?'
-        r'|export(?: type)? (?:\{[\w$ ,]*\}|\*(?: as [\w$]+)?)(?: from ["\'][^"\']*["\'])?'
-        r'|module\.exports(?:\.[A-Za-z_$][\w$]*)?|exports\.[A-Za-z_$][\w$]*')
+        r'|export(?: type)? (?:\{\}|\{ ' + ITEM_T + r'(?:, ' + ITEM_T + r')* \})(?: from ' + PATH_T + r')?'
+        r'|export \*(?: as ' + IDENT_T + r')? from ' + PATH_T +
+        r'|module\.exports(?:\.' + IDENT_T + r')?|exports\.' + IDENT_T)
     for name, src, want in forms:
         got = eng.signatures('t.ts', src + '\n')
         check('1.6.0 N1 таблица: ' + name + ' — подпись без тела и значений', got == want and 'secretCall' not in got and '=>' not in got, (got, want))

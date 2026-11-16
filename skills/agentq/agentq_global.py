@@ -3156,20 +3156,43 @@ AUTO_SOURCES = ('imports', 'named', 'siblings', 'importers')   # порядок 
 PATH_TOKEN = re.compile(r'[\w./-]+\.(?:py|js|mjs|cjs|ts|jsx|tsx)\b')
 
 
+JS_IDENT = r'(?:[^\W\d]|\$)[\w$]*'   # единственный терминал «идентификатор»: первый символ — буква (в т.ч. не-ASCII), _ или $, не цифра
 JS_KIND = r'(?:function\s*\*?|class|const|let|var|interface|type|enum|namespace)'
-JS_DECL = re.compile(r'export\s+(default\s+)?(?:declare\s+)?(?:abstract\s+)?(async\s+)?(' + JS_KIND + r')(?![\w$])(?:\s*(?!(?:extends|implements)(?![\w$]))([A-Za-z_$][\w$]*))?')
-JS_CJS = re.compile(r'module\.exports(?:\.[A-Za-z_$][\w$]*)?|exports\.[A-Za-z_$][\w$]*')
-JS_NAMES = re.compile(r'''export\s*(?:type\s*)?(?:\{[\w$\s,]*\}|\*(?:\s+as\s+[\w$]+)?)(?:\s*from\s*["'][^"']*["'])?''')
+JS_DECL = re.compile(r'export\s+(default\s+)?(?:declare\s+)?(?:abstract\s+)?(async\s+)?(' + JS_KIND + r')(?![\w$])(?:\s*(?!(?:extends|implements)(?![\w$]))(' + JS_IDENT + r'))?')
+JS_CJS = re.compile(r'module\.exports(?:\.' + JS_IDENT + r')?|exports\.' + JS_IDENT)
+JS_ITEM = JS_IDENT + r'(?:\s+as\s+' + JS_IDENT + r')?'
+JS_ITEM_CAP = r'(' + JS_IDENT + r')(?:\s+as\s+(' + JS_IDENT + r'))?'
+JS_PATH = r'(?:"([^"\\n]*)"|' + "'([^'\\\n]*)')"
+JS_TAIL = r'\s*;?\s*(?://.*|/\*.*)?$'
+JS_LIST = re.compile(r'export\s*(type\s*)?\{(\s*(?:' + JS_ITEM + r'(?:\s*,\s*' + JS_ITEM + r')*\s*,?)?\s*)\}(?:\s*from\s*' + JS_PATH + r')?' + JS_TAIL)
+JS_STAR = re.compile(r'export\s*\*(?:\s+as\s+(' + JS_IDENT + r'))?\s*from\s*' + JS_PATH + JS_TAIL)
+
+
+def js_reexport(s):
+    """Строгий разбор `export [type] { IDENT [as IDENT], … } [from "путь"]` и `export * [as IDENT] from "путь"`; вывод собирается заново.
+    Путь модуля сохраняется намеренно (имя зависимости, не значение). Не разобралось строгой грамматикой — ровно `export`."""
+    m = JS_LIST.match(s)
+    if m:
+        items = [a + (' as ' + b if b else '') for a, b in re.findall(JS_ITEM_CAP, m.group(2))]
+        path = m.group(3) if m.group(3) is not None else m.group(4)
+        return 'export' + (' type' if m.group(1) else '') + (' { ' + ', '.join(items) + ' }' if items else ' {}') + ('' if path is None else ' from "' + path + '"')
+    m = JS_STAR.match(s)
+    if m:
+        path = m.group(2) if m.group(2) is not None else m.group(3)
+        return 'export *' + (' as ' + m.group(1) if m.group(1) else '') + ' from "' + path + '"'
+    return 'export'
 
 
 def js_signature(s):
     """Подпись js/ts-строки — замкнутый белый список форм вывода (грамматика JS_SIGNATURE_GRAMMAR в selftest.py):
-    `export [default] [async] <вид объявления> [<имя>]`, `export { a, b } [from "x"]`, `module.exports[.x]`, `exports.x`.
-    Вывод собирается из разобранных частей (ключевое слово + идентификатор), а не вырезается из строки, поэтому ни тело, ни значение,
+    `export [default] [async] <вид объявления> [<имя>]`, `export { a, b as c } [from "x"]`, `export * [as x] from "x"`, `module.exports[.x]`, `exports.x`.
+    Вывод собирается из разобранных частей (ключевое слово + идентификатор JS_IDENT), а не вырезается из строки, поэтому ни тело, ни значение,
     ни параметры попасть в него не могут. Любой `export default` без вида объявления (литерал, выражение, вызов, стрелка) — ровно `export default`."""
-    m = JS_NAMES.match(s) or JS_CJS.match(s)
+    if re.match(r'export\s*(?:type\s*)?[{*]', s):
+        return js_reexport(s)
+    m = JS_CJS.match(s)
     if m:
-        return re.sub(r'\s+', ' ', m.group(0)).strip()
+        return m.group(0)
     m = JS_DECL.match(s)
     if m:
         dflt, asy, kind, name = m.groups()
