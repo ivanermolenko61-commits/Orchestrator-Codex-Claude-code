@@ -4235,6 +4235,8 @@ def t_v160():
         ('function*', 'export function* f(a) ' + body, 'export function* f(a) { … }'),
         ('метод класса', 'export class K ' + '{ m(a) ' + body + ' }', 'export class K { … }'),
         ('метод в литерале', 'export const o = { m(a) ' + body + ', k: 1 };', 'export const o = { m(a) { … }, k: 1 };'),
+        ('литерал с вложенным объектом и методом', 'export const o = { n: { m(a) ' + body + ' }, k: 1 };', 'export const o = { n: { … }, k: 1 };'),
+        ('module.exports = литерал с методом', 'module.exports = { m(a) ' + body + ', k: 1 };', 'module.exports = { m(a) { … }, k: 1 };'),
         ('interface', 'export interface I { a: number; f: (x: number) => void }', 'export interface I { a: number; f: (x: number) => void }'),
         ('type', 'export type T = { a: number; f: (x: number) => void };', 'export type T = { a: number; f: (x: number) => void };'),
     ]
