@@ -4149,7 +4149,7 @@ def t_v160():
     sj = eng.signatures('a.js', 'export function f(x) { return privateLogic(x); }\nexport const g = (a) => privateArrow(a);\nexport class K { m() { return secretBody(); } }\n')
     check('1.6.0 R7: подписи не содержат тел однострочных функций python и js',
           'private_logic' not in sp and 'hidden' not in sp and 'def f(x)' in sp and 'privateLogic' not in sj and 'privateArrow' not in sj
-          and 'secretBody' not in sj and 'export function f(x)' in sj, (sp, sj))
+          and 'secretBody' not in sj and 'export function f' in sj and 'export const g' in sj, (sp, sj))
 
     # R8: AGENTQ_PARTIAL=0 игнорирует ранее сохранённую выборку (после обрыва ревью)
     r8 = Proj('v160-r8', extra=PY_EXTRA, config=PCFG)
