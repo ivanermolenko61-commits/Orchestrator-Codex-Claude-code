@@ -3975,7 +3975,7 @@ def t_v160():
     call = rstate(f)['calls']['fe:author:1']
     ac = {e['path']: e for e in call.get('auto_context', [])}
     check('1.6.0 B1: автору Codex в запрос добавлены подписи без тел из каталога единицы (pluralRu виден, тело нет)',
-          rc == 0 and 'автоконтекст' in ap and 'export function pluralRu(forms, n)' in ap and 'return forms.many' not in ap, (out, err, ap[-1200:]))
+          rc == 0 and 'автоконтекст' in ap and 'export function pluralRu' in ap and 'forms, n' not in ap and 'return forms.many' not in ap, (out, err, ap[-1200:]))
     check('1.6.0 B1: context_meta вызова автора хранит путь, sha256, источник и режим «подпись»; соседний файл — источник siblings',
           'web/units.js' in ac and 'siblings' in ac['web/units.js']['sources'] and ac['web/units.js']['mode'] == 'signature' and len(ac['web/units.js']['sha256']) == 64
           and all(e['path'] != 'web/summary.js' for e in ac.values()), call.get('auto_context'))
@@ -4218,31 +4218,38 @@ def t_v160():
     # R7: стрелка без скобок и инициализатор поля класса — не в подписи
     sj2 = eng.signatures('b.js', 'export const f = x => privateLogic(x);\nexport class K { x = privateField(); m() { return 1; } }\nexport default async y => hiddenAsync(y);\n')
     check('1.6.0 R7: подпись не содержит тела стрелки без скобок и инициализаторов полей класса',
-          'privateLogic' not in sj2 and 'privateField' not in sj2 and 'hiddenAsync' not in sj2 and 'export const f = x =>' in sj2 and 'export class K' in sj2, sj2)
+          'privateLogic' not in sj2 and 'privateField' not in sj2 and 'hiddenAsync' not in sj2 and 'export const f' in sj2 and 'x =>' not in sj2 and 'export class K' in sj2, sj2)
 
     # N1 (круг 3): стрелка внутри тела объявления function не отключает отсечение тела
     sj3 = eng.signatures('c.js', 'export function f() { privateStep(); return x => x; }\nexport async function g(a) { hiddenCall(a); return b => b; }\nexport const h = function (a) { return inner(a); };\n')
     check('1.6.0 N1: стрелка внутри тела объявления function — тело в подпись не попадает',
-          'privateStep' not in sj3 and 'hiddenCall' not in sj3 and 'inner(' not in sj3 and 'export function f()' in sj3 and 'export async function g(a)' in sj3, sj3)
+          'privateStep' not in sj3 and 'hiddenCall' not in sj3 and 'inner(' not in sj3 and 'export function f' in sj3 and 'export async function g' in sj3, sj3)
 
-    # N1 (круг 4): отсечение тел по скобкам независимо от формы объявления; одно тело со стрелкой внутри во всех формах
+    # N1 (круг 5): подпись js/ts — только вид объявления и имя; тела, значения и параметры не попадают по построению
     body = '{ secretCall(a); return z => z + 1; }'
     forms = [
-        ('export function', 'export function f(a) ' + body, 'export function f(a) { … }'),
-        ('export async function', 'export async function f(a) ' + body, 'export async function f(a) { … }'),
-        ('export const = function', 'export const f = function (a) ' + body + ';', 'export const f = function (a) { … }'),
-        ('export const = () => {}', 'export const f = (a) => ' + body + ';', 'export const f = (a) => { … }'),
-        ('function*', 'export function* f(a) ' + body, 'export function* f(a) { … }'),
-        ('метод класса', 'export class K ' + '{ m(a) ' + body + ' }', 'export class K { … }'),
-        ('метод в литерале', 'export const o = { m(a) ' + body + ', k: 1 };', 'export const o = { m(a) { … }, k: 1 };'),
-        ('литерал с вложенным объектом и методом', 'export const o = { n: { m(a) ' + body + ' }, k: 1 };', 'export const o = { n: { … }, k: 1 };'),
-        ('module.exports = литерал с методом', 'module.exports = { m(a) ' + body + ', k: 1 };', 'module.exports = { m(a) { … }, k: 1 };'),
-        ('interface', 'export interface I { a: number; f: (x: number) => void }', 'export interface I { a: number; f: (x: number) => void }'),
-        ('type', 'export type T = { a: number; f: (x: number) => void };', 'export type T = { a: number; f: (x: number) => void };'),
+        ('export function', 'export function f(a) ' + body, 'export function f'),
+        ('export async function', 'export async function f(a) ' + body, 'export async function f'),
+        ('export const = function', 'export const f = function (a) ' + body + ';', 'export const f'),
+        ('export const = () => {}', 'export const f = (a) => ' + body + ';', 'export const f'),
+        ('function*', 'export function* f(a) ' + body, 'export function* f'),
+        ('метод класса', 'export class K extends B ' + '{ m(a) ' + body + ' }', 'export class K'),
+        ('метод в литерале', 'export const o = { m(a) ' + body + ', k: 1 };', 'export const o'),
+        ('литерал с вложенным объектом и методом', 'export const o = { n: { m(a) ' + body + ' }, k: 1 };', 'export const o'),
+        ('module.exports = литерал с методом', 'module.exports = { m(a) ' + body + ', k: 1 };', 'module.exports'),
+        ('interface', 'export interface I { a: number; f: (x: number) => void }', 'export interface I'),
+        ('type', 'export type T = { a: number; f: (x: number) => void };', 'export type T'),
+        ('вердикт N1: стрелка без {} в литерале', 'export const o = { run: a => secretCall(a), k: 1 };', 'export const o'),
+        ('вердикт N1: < в значении по умолчанию', 'export function f(a = 1 < 2) { secretCall(a); }', 'export function f'),
+        ('exports.name', 'exports.f = function (a) ' + body + ';', 'exports.f'),
+        ('export { a, b }', 'export { a, b as c } from "./x";', 'export { a, b as c } from "./x"'),
     ]
     for name, src, want in forms:
         got = eng.signatures('t.ts', src + '\n')
-        check('1.6.0 N1 таблица: ' + name + ' — подпись без тела', got == want and 'secretCall' not in got, (got, want))
+        check('1.6.0 N1 таблица: ' + name + ' — подпись без тела и значений', got == want and 'secretCall' not in got and '=>' not in got, (got, want))
+    # Python-файлы: результат не изменился (def/class с первой строкой docstring, без тел)
+    pysig = eng.signatures('m.py', '"""Модуль."""\ndef f(a, b=1):\n    """Сумма."""\n    return secretCall(a)\nclass K(B):\n    def m(self): return hidden()\n')
+    check('1.6.0 N1: подписи python не изменились', pysig == '"""Модуль."""\ndef f(a, b=1):\n    """Сумма."""\nclass K(B):\n    def m(self):', pysig)
 
     # R11: красная выборка, совпавшая с базой, — затраченное время остаётся в check_runs
     pf = {**PY_EXTRA, 'tests/test_stats.py': PY_EXTRA['tests/test_stats.py'] + '# FAIL_sh\n'}

@@ -3156,52 +3156,22 @@ AUTO_SOURCES = ('imports', 'named', 'siblings', 'importers')   # порядок 
 PATH_TOKEN = re.compile(r'[\w./-]+\.(?:py|js|mjs|cjs|ts|jsx|tsx)\b')
 
 
-def cut_js_body(s):
-    """Подпись js/ts-строки независимо от формы объявления: тело отсекается по скобкам, а не по виду объявления. Граница — первая `{`
-    или `=>` на нулевой глубине скобок ( ) [ ] < > (строки в кавычках пропускаются); всё после неё убирается, стрелки в теле не влияют.
-    Литерал `= { … }` остаётся с ключами первого уровня, вложенные {…} (тела методов) схлопываются. interface/type/enum и
-    `export {…}` / `export *` — целиком (в них нет исполняемых тел)."""
-    if re.match(r'export\s+(default\s+)?(declare\s+)?(interface|type|enum)\b|export\s*(type\s*)?[{*]', s):
-        return s
-    depth, i = 0, 0
-    while i < len(s):
-        c = s[i]
-        if c in '"\'`':
-            k = s.find(c, i + 1)
-            i = len(s) if k < 0 else k + 1
-            continue
-        if s.startswith('=>', i):
-            if depth == 0:
-                return s[:i].rstrip() + ' => { … }'
-            i += 2
-            continue
-        if c in '([<':
-            depth += 1
-        elif c in ')]>':
-            depth = max(0, depth - 1)
-        elif c == '{' and depth == 0:
-            head = s[:i].rstrip()
-            if not head.endswith('='):
-                return head + ' { … }'
-            out, d = [], 0
-            for ch in s[i:]:
-                if ch == '{':
-                    d += 1
-                    out.append(ch if d == 1 else ('{ … }' if d == 2 else ''))
-                elif ch == '}':
-                    d -= 1
-                    if d <= 0:
-                        out.append(ch)
-                elif d <= 1:
-                    out.append(ch)
-            return head + ' ' + ''.join(out)
-        i += 1
-    return s
+JS_DECL = re.compile(r'export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:(?:function\s*\*?|const|let|var|class|interface|type|enum|namespace)\s+)?[\w$]*')
+JS_CJS = re.compile(r'module\.exports(?:\.[\w$]+)?|exports\.[\w$]+')
+JS_NAMES = re.compile(r'''export\s*(?:type\s*)?(?:\{[\w$\s,]*\}|\*(?:\s+as\s+[\w$]+)?)(?:\s*from\s*["'][^"']*["'])?''')
+
+
+def js_signature(s):
+    """Подпись js/ts-строки: только вид объявления и имя (`export const o`, `export function f`, `interface Props`, `module.exports`).
+    Подпись берётся совпадением с шаблоном из ключевых слов и идентификатора, а не отсечением хвоста строки, поэтому ни тело, ни значение
+    литерала, ни параметры попасть в неё не могут по построению. Список `export { a, b }` — только идентификаторы."""
+    m = JS_NAMES.match(s) or JS_CJS.match(s) or JS_DECL.match(s)
+    return re.sub(r'\s+', ' ', m.group(0)).strip() if m else ''
 
 
 def signatures(path, text):
     """Подписи без тел: python — def/class (и методы) с первой строкой docstring, однострочное тело отсекается по позиции первой
-    инструкции; js/ts — export-объявления с предшествующим комментарием, тело функции (в том числе однострочное) отсекается."""
+    инструкции; js/ts — export-объявления с предшествующим комментарием, только вид объявления и имя."""
     out = []
     if path.endswith('.py'):
         import ast
@@ -3242,7 +3212,7 @@ def signatures(path, text):
                 while j > 0 and lines[j - 1].strip().startswith(('*', '/**', '//', '*/')) and i - j < 6:
                     j -= 1
                 out += [x.strip()[:200] for x in lines[j:i]]
-                out.append(cut_js_body(s)[:240])
+                out.append(js_signature(s)[:240])
     return '\n'.join(out)[:AUTO_PER_FILE]
 
 
