@@ -4248,6 +4248,12 @@ def t_v160():
         ('не-ASCII имя в списке', 'export { имя };', 'export { имя }'),
         ('вердикт круга 7: число в списке', 'export {123456};', 'export'),
         ('вердикт круга 7: число после * as', 'export * as 123456 from "./x";', 'export'),
+        ('вердикт круга 8: " внутри пути в одинарных кавычках', "export { a } from 'a\"b';", 'export'),
+        ("вердикт круга 8: ' внутри пути в двойных кавычках", 'export { a } from "a\'b";', 'export'),
+        ('вердикт круга 8: обратная косая внутри пути', 'export { a } from "a\\b";', 'export'),
+        ('вердикт круга 8: " внутри пути у export *', "export * from 'a\"b';", 'export'),
+        ('путь с буквой n и скоупом', 'export * from "@scope/pkg/x.js";', 'export * from "@scope/pkg/x.js"'),
+        ('путь с n в export { }', "export { a } from './node_modules/own';", 'export { a } from "./node_modules/own"'),
         ('число после as', 'export { a as 123 };', 'export'),
         ('имя, начинающееся с цифры', 'export { a, 1b };', 'export'),
         ('вердикт N1 круг 6: export default числовой литерал', 'export default 123456;', 'export default'),
@@ -4261,7 +4267,7 @@ def t_v160():
     # IDENT здесь записан от правил языка независимо от кода: первый символ — буква (в т.ч. не-ASCII), _ или $, дальше ещё цифры
     IDENT_T = r'[A-Za-z_$\u00c0-\uffff][A-Za-z0-9_$\u00c0-\uffff]*'
     ITEM_T = IDENT_T + r'(?: as ' + IDENT_T + r')?'
-    PATH_T = '"[^"]*"'
+    PATH_T = '"[^"\'\\\\\n]*"'   # путь: ни кавычек любого вида, ни обратной косой, ни перевода строки
     JS_SIGNATURE_GRAMMAR = re.compile(
         r'export(?: default)?(?: (?:async )?function\*?| (?:function\*?|class|const|let|var|interface|type|enum|namespace))(?: ' + IDENT_T + r')?'
         r'|export(?: default)?'
