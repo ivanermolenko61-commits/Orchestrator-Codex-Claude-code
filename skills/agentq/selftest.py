@@ -4243,10 +4243,23 @@ def t_v160():
         ('вердикт N1: < в значении по умолчанию', 'export function f(a = 1 < 2) { secretCall(a); }', 'export function f'),
         ('exports.name', 'exports.f = function (a) ' + body + ';', 'exports.f'),
         ('export { a, b }', 'export { a, b as c } from "./x";', 'export { a, b as c } from "./x"'),
+        ('вердикт N1 круг 6: export default числовой литерал', 'export default 123456;', 'export default'),
+        ('вердикт N1 круг 6: export default булев литерал', 'export default true;', 'export default'),
+        ('export default стрелка', 'export default (a) => secretCall(a);', 'export default'),
+        ('export default function без имени', 'export default function (a) ' + body, 'export default function'),
+        ('export default class extends', 'export default class extends Y ' + body, 'export default class'),
+        ('export default async-стрелка', 'export default async (a) => secretCall(a);', 'export default'),
     ]
+    # грамматика белого списка форм вывода: каждая подпись обязана ей соответствовать, иначе тело или значение могло попасть в вывод
+    JS_SIGNATURE_GRAMMAR = re.compile(
+        r'export(?: default)?(?: (?:async )?function\*?| (?:function\*?|class|const|let|var|interface|type|enum|namespace))(?: [A-Za-z_$][\w$]*)?'
+        r'|export(?: default)?'
+        r'|export(?: type)? (?:\{[\w$ ,]*\}|\*(?: as [\w$]+)?)(?: from ["\'][^"\']*["\'])?'
+        r'|module\.exports(?:\.[A-Za-z_$][\w$]*)?|exports\.[A-Za-z_$][\w$]*')
     for name, src, want in forms:
         got = eng.signatures('t.ts', src + '\n')
         check('1.6.0 N1 таблица: ' + name + ' — подпись без тела и значений', got == want and 'secretCall' not in got and '=>' not in got, (got, want))
+        check('1.6.0 N1 грамматика: ' + name + ' — подпись входит в белый список форм вывода', bool(JS_SIGNATURE_GRAMMAR.fullmatch(got)), got)
     # Python-файлы: результат не изменился (def/class с первой строкой docstring, без тел)
     pysig = eng.signatures('m.py', '"""Модуль."""\ndef f(a, b=1):\n    """Сумма."""\n    return secretCall(a)\nclass K(B):\n    def m(self): return hidden()\n')
     check('1.6.0 N1: подписи python не изменились', pysig == '"""Модуль."""\ndef f(a, b=1):\n    """Сумма."""\nclass K(B):\n    def m(self):', pysig)

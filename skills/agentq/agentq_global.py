@@ -3156,17 +3156,27 @@ AUTO_SOURCES = ('imports', 'named', 'siblings', 'importers')   # порядок 
 PATH_TOKEN = re.compile(r'[\w./-]+\.(?:py|js|mjs|cjs|ts|jsx|tsx)\b')
 
 
-JS_DECL = re.compile(r'export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:(?:function\s*\*?|const|let|var|class|interface|type|enum|namespace)\s+)?[\w$]*')
-JS_CJS = re.compile(r'module\.exports(?:\.[\w$]+)?|exports\.[\w$]+')
+JS_KIND = r'(?:function\s*\*?|class|const|let|var|interface|type|enum|namespace)'
+JS_DECL = re.compile(r'export\s+(default\s+)?(?:declare\s+)?(?:abstract\s+)?(async\s+)?(' + JS_KIND + r')(?![\w$])(?:\s*(?!(?:extends|implements)(?![\w$]))([A-Za-z_$][\w$]*))?')
+JS_CJS = re.compile(r'module\.exports(?:\.[A-Za-z_$][\w$]*)?|exports\.[A-Za-z_$][\w$]*')
 JS_NAMES = re.compile(r'''export\s*(?:type\s*)?(?:\{[\w$\s,]*\}|\*(?:\s+as\s+[\w$]+)?)(?:\s*from\s*["'][^"']*["'])?''')
 
 
 def js_signature(s):
-    """Подпись js/ts-строки: только вид объявления и имя (`export const o`, `export function f`, `interface Props`, `module.exports`).
-    Подпись берётся совпадением с шаблоном из ключевых слов и идентификатора, а не отсечением хвоста строки, поэтому ни тело, ни значение
-    литерала, ни параметры попасть в неё не могут по построению. Список `export { a, b }` — только идентификаторы."""
-    m = JS_NAMES.match(s) or JS_CJS.match(s) or JS_DECL.match(s)
-    return re.sub(r'\s+', ' ', m.group(0)).strip() if m else ''
+    """Подпись js/ts-строки — замкнутый белый список форм вывода (грамматика JS_SIGNATURE_GRAMMAR в selftest.py):
+    `export [default] [async] <вид объявления> [<имя>]`, `export { a, b } [from "x"]`, `module.exports[.x]`, `exports.x`.
+    Вывод собирается из разобранных частей (ключевое слово + идентификатор), а не вырезается из строки, поэтому ни тело, ни значение,
+    ни параметры попасть в него не могут. Любой `export default` без вида объявления (литерал, выражение, вызов, стрелка) — ровно `export default`."""
+    m = JS_NAMES.match(s) or JS_CJS.match(s)
+    if m:
+        return re.sub(r'\s+', ' ', m.group(0)).strip()
+    m = JS_DECL.match(s)
+    if m:
+        dflt, asy, kind, name = m.groups()
+        kind = re.sub(r'\s+', '', kind)
+        out = 'export' + (' default' if dflt else '') + (' async' if asy and kind.startswith('function') else '') + ' ' + kind
+        return out + (' ' + name if name else '')
+    return 'export default' if re.match(r'export\s+default(?![\w$])', s) else 'export' if s.startswith('export') else ''
 
 
 def signatures(path, text):
