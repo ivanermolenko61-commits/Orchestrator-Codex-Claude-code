@@ -4225,6 +4225,23 @@ def t_v160():
     check('1.6.0 N1: стрелка внутри тела объявления function — тело в подпись не попадает',
           'privateStep' not in sj3 and 'hiddenCall' not in sj3 and 'inner(' not in sj3 and 'export function f()' in sj3 and 'export async function g(a)' in sj3, sj3)
 
+    # N1 (круг 4): отсечение тел по скобкам независимо от формы объявления; одно тело со стрелкой внутри во всех формах
+    body = '{ secretCall(a); return z => z + 1; }'
+    forms = [
+        ('export function', 'export function f(a) ' + body, 'export function f(a) { … }'),
+        ('export async function', 'export async function f(a) ' + body, 'export async function f(a) { … }'),
+        ('export const = function', 'export const f = function (a) ' + body + ';', 'export const f = function (a) { … }'),
+        ('export const = () => {}', 'export const f = (a) => ' + body + ';', 'export const f = (a) => { … }'),
+        ('function*', 'export function* f(a) ' + body, 'export function* f(a) { … }'),
+        ('метод класса', 'export class K ' + '{ m(a) ' + body + ' }', 'export class K { … }'),
+        ('метод в литерале', 'export const o = { m(a) ' + body + ', k: 1 };', 'export const o = { m(a) { … }, k: 1 };'),
+        ('interface', 'export interface I { a: number; f: (x: number) => void }', 'export interface I { a: number; f: (x: number) => void }'),
+        ('type', 'export type T = { a: number; f: (x: number) => void };', 'export type T = { a: number; f: (x: number) => void };'),
+    ]
+    for name, src, want in forms:
+        got = eng.signatures('t.ts', src + '\n')
+        check('1.6.0 N1 таблица: ' + name + ' — подпись без тела', got == want and 'secretCall' not in got, (got, want))
+
     # R11: красная выборка, совпавшая с базой, — затраченное время остаётся в check_runs
     pf = {**PY_EXTRA, 'tests/test_stats.py': PY_EXTRA['tests/test_stats.py'] + '# FAIL_sh\n'}
     r11 = Proj('v160-r11', extra=pf, config=PCFG)

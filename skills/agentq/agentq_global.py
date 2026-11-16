@@ -3156,6 +3156,49 @@ AUTO_SOURCES = ('imports', 'named', 'siblings', 'importers')   # порядок 
 PATH_TOKEN = re.compile(r'[\w./-]+\.(?:py|js|mjs|cjs|ts|jsx|tsx)\b')
 
 
+def cut_js_body(s):
+    """Подпись js/ts-строки независимо от формы объявления: тело отсекается по скобкам, а не по виду объявления. Граница — первая `{`
+    или `=>` на нулевой глубине скобок ( ) [ ] < > (строки в кавычках пропускаются); всё после неё убирается, стрелки в теле не влияют.
+    Литерал `= { … }` остаётся с ключами первого уровня, вложенные {…} (тела методов) схлопываются. interface/type/enum и
+    `export {…}` / `export *` — целиком (в них нет исполняемых тел)."""
+    if re.match(r'export\s+(default\s+)?(declare\s+)?(interface|type|enum)\b|export\s*(type\s*)?[{*]', s):
+        return s
+    depth, i = 0, 0
+    while i < len(s):
+        c = s[i]
+        if c in '"\'`':
+            k = s.find(c, i + 1)
+            i = len(s) if k < 0 else k + 1
+            continue
+        if s.startswith('=>', i):
+            if depth == 0:
+                return s[:i].rstrip() + ' => { … }'
+            i += 2
+            continue
+        if c in '([<':
+            depth += 1
+        elif c in ')]>':
+            depth = max(0, depth - 1)
+        elif c == '{' and depth == 0:
+            head = s[:i].rstrip()
+            if not head.endswith('='):
+                return head + ' { … }'
+            out, d = [], 0
+            for ch in s[i:]:
+                if ch == '{':
+                    d += 1
+                    out.append(ch if d == 1 else ('{ … }' if d == 2 else ''))
+                elif ch == '}':
+                    d -= 1
+                    if d <= 0:
+                        out.append(ch)
+                elif d <= 1:
+                    out.append(ch)
+            return head + ' ' + ''.join(out)
+        i += 1
+    return s
+
+
 def signatures(path, text):
     """Подписи без тел: python — def/class (и методы) с первой строкой docstring, однострочное тело отсекается по позиции первой
     инструкции; js/ts — export-объявления с предшествующим комментарием, тело функции (в том числе однострочное) отсекается."""
@@ -3199,14 +3242,7 @@ def signatures(path, text):
                 while j > 0 and lines[j - 1].strip().startswith(('*', '/**', '//', '*/')) and i - j < 6:
                     j -= 1
                 out += [x.strip()[:200] for x in lines[j:i]]
-                m = re.search(r'\)\s*(?::\s*[^={;]+)?\s*(\{|=>)', s)
-                if re.match(r'export\s+(default\s+)?(abstract\s+)?(class|interface)\b', s):   # класс/интерфейс: тело (в том числе поля) отсекается первым
-                    s = re.sub(r'\s*\{.*$', ' { … }', s)
-                elif '=>' in s and not re.match(r'export\s+(default\s+)?(async\s+)?function\b', s):   # стрелка: до первой стрелки; объявление function — по скобке параметров (стрелка в его теле не в счёт)
-                    s = s[:s.index('=>')].rstrip() + ' => { … }'
-                elif m:   # функция: оставляем до закрывающей скобки параметров
-                    s = s[:m.start() + 1] + ' { … }'
-                out.append(s[:240])
+                out.append(cut_js_body(s)[:240])
     return '\n'.join(out)[:AUTO_PER_FILE]
 
 
