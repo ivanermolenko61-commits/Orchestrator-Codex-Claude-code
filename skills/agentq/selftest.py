@@ -4245,7 +4245,25 @@ def t_v160():
         ('export { a, b }', 'export { a, b as c } from "./x";', 'export { a, b as c } from "./x"'),
         ('export * as x from', 'export * as x from "./y";', 'export * as x from "./y"'),
         ('export type { }', "export type { A, B, } from './t'; // c", 'export type { A, B } from "./t"'),
-        ('не-ASCII имя в списке', 'export { имя };', 'export { имя }'),
+        ('вердикт круга 10: не-ASCII имя в списке — резервный вывод', 'export { имя };', 'export'),
+        ('вердикт круга 10: export { ¼ }', 'export { ¼ };', 'export'),
+        ('вердикт круга 10: хвост имени не-ASCII (¼) в списке', 'export { a¼ };', 'export'),
+        ('вердикт круга 10: хвост имени не-ASCII (²) в списке', 'export { a² };', 'export'),
+        ('вердикт круга 10: after as не-ASCII', 'export { a as b² };', 'export'),
+        ('вердикт круга 10: export * as a² from', 'export * as a² from "x";', 'export'),
+        ('вердикт круга 10: module.exports.a²', 'module.exports.a² = 1;', 'module.exports'),
+        ('вердикт круга 10: exports.a²', 'exports.a² = 1;', 'export'),
+        ('вердикт круга 10: не-ASCII имя функции', 'export function имя(a) ' + body, 'export function'),
+        ('вердикт круга 10: хвост имени объявления не-ASCII', 'export const a² = secretCall(1);', 'export const'),
+        ('вердикт круга 10: путь с пробелом', 'export { a } from "a b";', 'export'),
+        ('вердикт круга 10: путь с табуляцией', 'export { a } from "a\tb";', 'export'),
+        ('вердикт круга 10: путь с U+2028', 'export { a } from "a\u2028b";', 'export'),
+        ('вердикт круга 10: путь с U+202E', 'export { a } from "a\u202eb";', 'export'),
+        ('вердикт круга 10: путь с не-ASCII буквой', 'export { a } from "./é";', 'export'),
+        ('вердикт круга 10: путь с DEL (0x7F)', 'export * from "a\x7fb";', 'export'),
+        ('круг 10: имена с $ и _', 'export { $a, _b as $c, d_$ };', 'export { $a, _b as $c, d_$ }'),
+        ('круг 10: путь node:fs', 'export { a } from "node:fs";', 'export { a } from "node:fs"'),
+        ('круг 10: путь с # % & ( [ ] ~', 'export * from "#a/%b&(c)[d]~";', 'export * from "#a/%b&(c)[d]~"'),
         ('вердикт круга 7: число в списке', 'export {123456};', 'export'),
         ('вердикт круга 7: число после * as', 'export * as 123456 from "./x";', 'export'),
         ('вердикт круга 8: " внутри пути в одинарных кавычках', "export { a } from 'a\"b';", 'export'),
@@ -4264,10 +4282,10 @@ def t_v160():
         ('export default async-стрелка', 'export default async (a) => secretCall(a);', 'export default'),
     ]
     # грамматика белого списка форм вывода: каждая подпись обязана ей соответствовать, иначе тело или значение могло попасть в вывод
-    # IDENT здесь записан от правил языка независимо от кода: первый символ — буква (в т.ч. не-ASCII), _ или $, дальше ещё цифры
-    IDENT_T = r'[A-Za-z_$\u00c0-\uffff][A-Za-z0-9_$\u00c0-\uffff]*'
+    # Терминалы вывода — только ASCII, перечислены явно, без \w, \d и диапазонов Unicode (круг 10: состав Unicode-классов никто не перечислял)
+    IDENT_T = r'[A-Za-z_$][A-Za-z0-9_$]*'
     ITEM_T = IDENT_T + r'(?: as ' + IDENT_T + r')?'
-    PATH_T = '"[^"\'\\\\\n]*"'   # путь: ни кавычек любого вида, ни обратной косой, ни перевода строки
+    PATH_T = r'"[\x21\x23-\x26\x28-\x5b\x5d-\x7e]*"'   # путь: печатный ASCII 0x21–0x7E без " (0x22), ' (0x27), \ (0x5C)
     JS_SIGNATURE_GRAMMAR = re.compile(
         r'export(?: default)?(?: (?:async )?function\*?| (?:function\*?|class|const|let|var|interface|type|enum|namespace))(?: ' + IDENT_T + r')?'
         r'|export(?: default)?'
@@ -4278,6 +4296,23 @@ def t_v160():
         got = eng.signatures('t.ts', src + '\n')
         check('1.6.0 N1 таблица: ' + name + ' — подпись без тела и значений', got == want and 'secretCall' not in got and '=>' not in got, (got, want))
         check('1.6.0 N1 грамматика: ' + name + ' — подпись входит в белый список форм вывода', bool(JS_SIGNATURE_GRAMMAR.fullmatch(got)), got)
+    # круг 10: js_signature напрямую (signatures режет строки по splitlines, поэтому \r в пути иначе до разбора не доходит)
+    for name, src in (('путь с \\r', 'export { a } from "a\rb";'), ('путь с \\n', 'export * from "a\nb";'), ('путь с \\x0b', 'export * from "a\x0bb";'),
+                      ('путь с U+0085', 'export * from "a\x85b";'), ('путь с U+202E', 'export * from "a‮b";')):
+        got = eng.js_signature(src)
+        check('1.6.0 N1 круг 10: js_signature напрямую, ' + name + ' — резервный вывод', got == 'export', got)
+    # круг 10: перебор ВСЕХ символов Unicode (кроме суррогатов) в позициях «начало имени», «хвост имени», «путь в " "», «путь в \' \'»:
+    # результат обязан быть ASCII и входить в грамматику; ни один символ вне перечисленных терминалов не попадает в вывод
+    bad_cp = []
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        for src in ('export { ' + ch + 'a };', 'export { a' + ch + ' };', 'export * from "' + ch + '";', "export { a } from '" + ch + "';"):
+            got = eng.js_signature(src)
+            if not got.isascii() or not JS_SIGNATURE_GRAMMAR.fullmatch(got):
+                bad_cp.append((hex(cp), src, got))
+    check('1.6.0 N1 круг 10: перебор всех символов Unicode в 4 позициях — вывод всегда ASCII и входит в грамматику', not bad_cp, bad_cp[:5])
     # Python-файлы: результат не изменился (def/class с первой строкой docstring, без тел)
     pysig = eng.signatures('m.py', '"""Модуль."""\ndef f(a, b=1):\n    """Сумма."""\n    return secretCall(a)\nclass K(B):\n    def m(self): return hidden()\n')
     check('1.6.0 N1: подписи python не изменились', pysig == '"""Модуль."""\ndef f(a, b=1):\n    """Сумма."""\nclass K(B):\n    def m(self):', pysig)

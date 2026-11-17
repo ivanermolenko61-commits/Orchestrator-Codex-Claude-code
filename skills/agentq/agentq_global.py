@@ -3156,13 +3156,16 @@ AUTO_SOURCES = ('imports', 'named', 'siblings', 'importers')   # порядок 
 PATH_TOKEN = re.compile(r'[\w./-]+\.(?:py|js|mjs|cjs|ts|jsx|tsx)\b')
 
 
-JS_IDENT = r'(?:[^\W\d]|\$)[\w$]*'   # единственный терминал «идентификатор»: первый символ — буква (в т.ч. не-ASCII), _ или $, не цифра
+# Терминалы вывода — только ASCII, перечислены явно (никаких \w, \d и диапазонов Unicode: их состав не перечислить и он давал круги 7–9).
+# Не-ASCII имя или путь не разбираются → резервный вывод (`export`, `export default`, `module.exports`): это потеря подписи, а не утечка.
+# Хвост (?![\w$]) ничего не выводит: он лишь запрещает считать ASCII-началом имени то, за чем сразу идёт другой символ идентификатора (Unicode) — строже, не мягче.
+JS_IDENT = r'[A-Za-z_$][A-Za-z0-9_$]*(?![\w$])'   # единственный терминал «идентификатор»
 JS_KIND = r'(?:function\s*\*?|class|const|let|var|interface|type|enum|namespace)'
 JS_DECL = re.compile(r'export\s+(default\s+)?(?:declare\s+)?(?:abstract\s+)?(async\s+)?(' + JS_KIND + r')(?![\w$])(?:\s*(?!(?:extends|implements)(?![\w$]))(' + JS_IDENT + r'))?')
 JS_CJS = re.compile(r'module\.exports(?:\.' + JS_IDENT + r')?|exports\.' + JS_IDENT)
 JS_ITEM = JS_IDENT + r'(?:\s+as\s+' + JS_IDENT + r')?'
 JS_ITEM_CAP = r'(' + JS_IDENT + r')(?:\s+as\s+(' + JS_IDENT + r'))?'
-JS_PATH_CHARS = r'[^"\'\\\n]*'   # единственный терминал «путь модуля»: ни одной кавычки (ни " ни '), ни \, ни перевода строки — вывод всегда в двойных кавычках
+JS_PATH_CHARS = r'[\x21\x23-\x26\x28-\x5b\x5d-\x7e]*'   # единственный терминал «путь модуля»: печатный ASCII 0x21–0x7E без " (0x22), ' (0x27), \ (0x5C); пробела, управляющих и не-ASCII нет
 JS_PATH = r'(?:"(' + JS_PATH_CHARS + r')"|\'(' + JS_PATH_CHARS + r')\')'
 JS_TAIL = r'\s*;?\s*(?://.*|/\*.*)?$'
 JS_LIST = re.compile(r'export\s*(type\s*)?\{(\s*(?:' + JS_ITEM + r'(?:\s*,\s*' + JS_ITEM + r')*\s*,?)?\s*)\}(?:\s*from\s*' + JS_PATH + r')?' + JS_TAIL)
