@@ -72,9 +72,17 @@
       "sha256": "8d1a12043c70d442e2f31934694b5876fae79af0081696a9cf312040de64de83",
       "git_blob": "c9457b9e010b2985bc8c734f60ad99dfb4a4807a"
     },
+    "docs/acceptance/2026-11-20-codex-qwen/guidance-1-metadata.json": {
+      "sha256": "d407d3f2f2bea3480d6eea8e0c47aae5034094d63be5b71a55e74b41fe6b9c6c",
+      "git_blob": "5f73eb6d2b340065276e1a196ad9dd4581fc3de0"
+    },
+    "docs/acceptance/2026-11-20-codex-qwen/guidance-1.json": {
+      "sha256": "c5bf14056626b50d8a0aae7225a003a1408a9b3cbadf3c95c2310fa62e644aee",
+      "git_blob": "c429476628f7429e4733590a179757c03435662a"
+    },
     "docs/acceptance/2026-11-20-codex-qwen/README.md": {
-      "sha256": "03ac39dca47a9cda025c57180e673d803898949cff48754cf8728bc0fbb384e9",
-      "git_blob": "1ae7d68b3f300780751701da5c45bdcf0ee2ee5d"
+      "sha256": "1cfa16ec56aac69ffe483931bf921b6c4b6c12e4c3ea130a1428305a2be87354",
+      "git_blob": "17b4c674d9fa1aad62d8e08d3fabe4ea96c8a8f0"
     },
     "docs/acceptance/2026-11-20-codex-qwen/transport-1-metadata.json": {
       "sha256": "115fedd4a8d4eef49ec681a04606fb1ef6647c51ea791c5ffc1422c3a54da45d",
@@ -125,8 +133,8 @@
       "git_blob": "60d1b412a46d37040649119db4d24ee0f3bf76d9"
     },
     "README.md": {
-      "sha256": "49118f4fd7e35a84addc71032fa3e5dff25327ade849fc5083fa8fad861907ba",
-      "git_blob": "0c9b564f4b97656fc4705dbc774b282234b11dff"
+      "sha256": "f1a21cb668a9a526a9d8bc5940fddc6b870dabff0e8c58c283ce025ab43d1614",
+      "git_blob": "0aff6edf5b6fab007a3be04f7cf270a4c88b96ec"
     },
     "scripts/benchmark-pair.py": {
       "sha256": "93405748b2e63f0fd4b116a2b03a6fed9532ec03350d43f6c80476d92ad33d29",
@@ -193,8 +201,8 @@
       "git_blob": "ad1448b14294f8d00c996923a3ea100f515f4dde"
     },
     "skills/agentq/selftest_pair.py": {
-      "sha256": "834e404c7f10fc888ea0de7190cf8fbfb20e0ca36a8011453032d6e03980ecc5",
-      "git_blob": "b3770ea1f774fd8621d35771c08a34e0e2804b10"
+      "sha256": "ab2ae414f1c008dd6060fff0abec3d15f9fc1235ec9563bb154ceb072b89d57e",
+      "git_blob": "c8b31d651945b1dc9a95059e55c54446a04f8fa3"
     },
     "skills/agentq/SKILL.md": {
       "sha256": "d04303390e41eab95fc640e63cdc8813b74ea1d71853b56df58c9250fbff8c66",

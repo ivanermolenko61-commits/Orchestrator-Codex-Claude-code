@@ -208,6 +208,10 @@ class PairTests(unittest.TestCase):
         self.command(p, 'checks', 'main')
         self.assertTrue(fixture.rstate(p)['units']['main']['checks']['waived'])
         self.assertFalse(p.calls())
+        p.script('codex', [{'json': PASS}])
+        self.command(p, 'review')
+        self.command(p, 'finish')
+        self.assertEqual(len(p.calls()), 1)
 
     def test_profile_rejects_inert_arguments(self):
         p = fixture.Proj('pair-profile')

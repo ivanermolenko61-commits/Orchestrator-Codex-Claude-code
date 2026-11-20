@@ -41,6 +41,8 @@ Qwen должен быть авторизован по подписке. Нал�
 только с явно заданным CLAUDE_HOME (для проверки или отдельного согласованного возврата).
 
 Живые результаты и ограничения: [сравнение двух режимов](docs/benchmarks/2026-11-20-codex-qwen.md).
+Точные SHA и результаты проверок: [независимая приёмка](docs/acceptance/2026-11-20-codex-qwen/README.md).
+Подтверждение выпуска, рабочая установка и возврат: [порядок выпуска](docs/release-codex-qwen.md).
 Воспроизведение: `python scripts/benchmark-pair.py --run-live --output-root <пустой каталог> sequential`,
 затем `parallel` с тем же output-root. Это настоящие платные вызовы CLI и Docker.
 

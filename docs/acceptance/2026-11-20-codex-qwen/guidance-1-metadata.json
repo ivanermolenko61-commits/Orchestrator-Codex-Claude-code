@@ -1,0 +1,19 @@
+{
+  "sha": "e1a39e112de3fcf928ef37fc813c7e70704acf30",
+  "files": [
+    "skills/agentq/agentq_global.py",
+    "skills/agentq/selftest_pair.py",
+    "skills/agentq/SKILL.md"
+  ],
+  "prompt_bytes": 65122,
+  "prompt_sha256": "5430f8d2b616788c151eebc93718afbcd08dc662c825f0506ebe85e57bf50a10",
+  "model": "qwen4-max",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 15185,
+    "output_tokens": 4635,
+    "cache_read_input_tokens": 512,
+    "total_tokens": 19820
+  },
+  "events_sha256": "f68554f49dd40279b160af405f2f646e556d69536bb8eaf6e45122699b3691a4"
+}
