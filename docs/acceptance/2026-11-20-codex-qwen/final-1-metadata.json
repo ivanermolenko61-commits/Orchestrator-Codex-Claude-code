@@ -1,0 +1,20 @@
+{
+  "sha": "553d89419aa4a69e2608c2443ed8925d9139bf7a",
+  "files": [
+    "skills/agentq/agentq_global.py",
+    "skills/agentq/selftest_pair.py",
+    "scripts/install-pair.py",
+    "scripts/test-install-pair.py"
+  ],
+  "prompt_bytes": 38709,
+  "prompt_sha256": "5ec84e8954e3f28fa300e111dfc47874c1c20340ab98499f356b8ee17227581b",
+  "model": "qwen4-max",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 10092,
+    "output_tokens": 4643,
+    "cache_read_input_tokens": 0,
+    "total_tokens": 14735
+  },
+  "events_sha256": "3fb8a56ae01e99e12c1cda7c14158e1a233ff9343002f406f4b134190fb3201d"
+}

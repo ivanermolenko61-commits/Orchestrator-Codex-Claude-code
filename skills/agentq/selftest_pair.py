@@ -61,6 +61,24 @@ class PairTests(unittest.TestCase):
         self.assertEqual(len(p.calls()), 1)
         self.assertTrue(p.calls()[0].startswith('qwen-review'))
 
+    def test_protected_units_are_symmetric_and_direct_only(self):
+        for author in e.SERVICES:
+            with self.subTest(author=author):
+                p = fixture.Proj('pair-protected')
+                p.env['AGENTQ_LEAD'] = author
+                self.command(p, 'start', 'protected direct change', '--kind', 'mixed', '--author', author, '--contract-file', p.contract())
+                self.command(p, 'unit', 'guard', '--kind', 'protected', '--files', 'package.json', '--author', author)
+                self.assertEqual(p.cr('author', 'guard')[0], 2)
+                self.assertFalse(p.calls())
+                p.commit('package.json', '{"description":"trusted lead change"}\n')
+                if author == 'codex':
+                    p.script('qwen', [PASS])
+                else:
+                    p.script('codex', [{'json': PASS}])
+                self.command(p, 'review', 'guard')
+                self.command(p, 'finish')
+                self.assertEqual(len(p.calls()), 1)
+
     def test_legacy_state_is_readable_and_never_relabelled(self):
         p = fixture.Proj('pair-legacy')
         self.command(p, 'start', 'legacy')
@@ -101,6 +119,33 @@ class PairTests(unittest.TestCase):
         self.command(p, 'review')
         p.env['AGENTQ_LEAD'] = 'codex'
         self.command(p, 'finish')
+
+    def test_direct_submission_handoff_is_bound_to_sha(self):
+        for author in e.SERVICES:
+            with self.subTest(author=author):
+                p = fixture.Proj('pair-direct-handoff')
+                reviewer = 'qwen' if author == 'codex' else 'codex'
+                p.env['AGENTQ_LEAD'] = author
+                self.command(p, 'start', 'direct handoff', '--author', author)
+                tip = p.commit('backend/app.py', 'def add(a,b):\n    return a+b+1\n')
+                self.command(p, 'checks', 'main')
+                record = fixture.rstate(p)['units']['main']['direct_author']
+                self.assertEqual(record, {'author': author, 'sha': tip})
+                p.env['AGENTQ_LEAD'] = reviewer
+                p.commit('backend/app.py', 'def add(a,b):\n    return a+b+2\n')
+                self.command(p, 'checks', 'main')
+                self.assertEqual(fixture.rstate(p)['units']['main']['direct_author'], record)
+                self.assertEqual(p.cr('review')[0], 2)
+                self.assertFalse(p.calls())
+                # The pinned author owns the next submission; checks binds that SHA.
+                p.env['AGENTQ_LEAD'] = author
+                p.commit('backend/app.py', 'def add(a,b):\n    return a+b+3\n')
+                self.command(p, 'checks', 'main')
+                p.env['AGENTQ_LEAD'] = reviewer
+                p.script(reviewer, [PASS] if reviewer == 'qwen' else [{'json': PASS}])
+                self.command(p, 'review')
+                self.command(p, 'finish')
+                self.assertEqual(len(p.calls()), 1)
 
     def test_cross_class_checks_and_waiver(self):
         p = fixture.Proj('pair-check-coverage')
@@ -144,6 +189,16 @@ class PairTests(unittest.TestCase):
                 return str(Path(tmp) / ('qwen.cmd' if name == 'qwen' else 'node.exe'))
             with patch.dict(os.environ, {'QWEN_BIN': ''}), patch.object(q.shutil, 'which', side_effect=which):
                 self.assertEqual(q.discover(e.split_bin), [which('node'), str(cli)])
+
+    def test_all_unconfigured_classes_can_be_waived(self):
+        p = fixture.Proj('pair-no-suites', config={})
+        self.command(p, 'start', 'direct changes without configured suites')
+        p.commit('frontend/src/App.tsx', fixture.APP_V1)
+        self.assertEqual(p.cr('checks', 'main')[0], 2)
+        self.command(p, 'waive', 'main', 'No checks configured in this baseline; independent manual validation recorded for this SHA.')
+        self.command(p, 'checks', 'main')
+        self.assertTrue(fixture.rstate(p)['units']['main']['checks']['waived'])
+        self.assertFalse(p.calls())
 
     def test_profile_rejects_inert_arguments(self):
         p = fixture.Proj('pair-profile')

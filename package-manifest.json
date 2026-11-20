@@ -48,6 +48,14 @@
       "sha256": "ae88d388510188eeadbab23f07cee0e3a147d54bc348ea2ae9a130abe1ae475e",
       "git_blob": "98ea39b977782ac46879abf2dbb12150633c0abc"
     },
+    "docs/acceptance/2026-11-20-codex-qwen/final-1-metadata.json": {
+      "sha256": "595093af65f1cdcd5dd22ed17f043ed1473971ef1400c5795015587475e1406c",
+      "git_blob": "280ce0895d7c9e3bebef9b8534f2dd8da5817a2c"
+    },
+    "docs/acceptance/2026-11-20-codex-qwen/final-1.json": {
+      "sha256": "a1ce1eff7c8c0b2cd83930115680e7e3437e61cea3f4a9033cbcaa1613f82f36",
+      "git_blob": "364a96627d6ecceead1b9b943172bc6c3c9eabc4"
+    },
     "docs/acceptance/2026-11-20-codex-qwen/followup-1-metadata.json": {
       "sha256": "81fcb9ed9b5ff3ab6a243958ffcc98b85d14e6e385729f2683030d2f551d07f8",
       "git_blob": "b3f6c28fdc9148efc1803b72b909455c3c9b0303"
@@ -55,6 +63,10 @@
     "docs/acceptance/2026-11-20-codex-qwen/followup-1.json": {
       "sha256": "8d1a12043c70d442e2f31934694b5876fae79af0081696a9cf312040de64de83",
       "git_blob": "c9457b9e010b2985bc8c734f60ad99dfb4a4807a"
+    },
+    "docs/acceptance/2026-11-20-codex-qwen/README.md": {
+      "sha256": "e633936f0a0d8aaafe08297bc7a6de3b95c92a0ce8d13621b7ba105bd04c344c",
+      "git_blob": "da87290d8e229ac2b959e26afd234617c7c27d2e"
     },
     "docs/acceptance/2026-11-20-codex-qwen/transport-1-metadata.json": {
       "sha256": "115fedd4a8d4eef49ec681a04606fb1ef6647c51ea791c5ffc1422c3a54da45d",
@@ -69,8 +81,8 @@
       "git_blob": "8d48a1a311142e8635066a615f46ffb014e08a63"
     },
     "docs/benchmarks/2026-11-20-codex-qwen.md": {
-      "sha256": "36542bc6a658fdfe5c3fc2d297769f4b6d09d3cbf0bcc400cb809bbcec4f75f3",
-      "git_blob": "153634a18c428a9d371d3661165cd13f3c9ad36d"
+      "sha256": "2c713972ca5b27da6b90d1d70c5c43f87fcd704957b0b0c7edfb1c29187854a4",
+      "git_blob": "0b1b4a9f2431d7c0e7a854ab79709bdde5b23ed6"
     },
     "docs/release-codex-qwen.md": {
       "sha256": "971c6627fc289f83cdb6348d1e60b5beed3d98748aac385376094373395c393a",
@@ -133,8 +145,8 @@
       "git_blob": "cb51fc1e48274f981b41d5e23fe996b8431c3001"
     },
     "skills/agentq/agentq_global.py": {
-      "sha256": "6677bf6c1871be4f65aed2ed64dac29e501715fafb90dd6a843a1ce4c6f74b97",
-      "git_blob": "8a208a8082abb58d3b7034606d574ab778d4cb50"
+      "sha256": "d3cfdf52848e8373331f37c829a1e290264f935ba1ea87ecf728127e50903efc",
+      "git_blob": "e99952679c9b98beb9de78e5b467dd6a61bff680"
     },
     "skills/agentq/codex-review.sh": {
       "sha256": "c78dc298bb0520f6c4c76b60133b3628d715e1db9947ed4ccb2a245a49ae4a3e",
@@ -173,12 +185,12 @@
       "git_blob": "ad1448b14294f8d00c996923a3ea100f515f4dde"
     },
     "skills/agentq/selftest_pair.py": {
-      "sha256": "e604badc9b2e179fd8c1c700e91028a7f7b009469985f52503d6656cd5d54583",
-      "git_blob": "0a2a48e2d6b42a431aee629afe75ae760437ff56"
+      "sha256": "275c2496b6cfb50bd07278b17242b86439c770c98001f6e80cd84c8b40b3d8f2",
+      "git_blob": "26a0530ac4287a337cd1130ab134c9e341f9a9ae"
     },
     "skills/agentq/SKILL.md": {
-      "sha256": "166ff93bcd739355edd9d0ce165656e2f9e6df28c20cf45d2f783774c0de88ea",
-      "git_blob": "3ab1818645d084abcc34c907f30626dc0203d9b4"
+      "sha256": "a7568de7abe9d8f54addaa689eb8d6f7c6350beada5bf4d5ceb92d86da262d32",
+      "git_blob": "3afbb82b307a4c9b14e651b9023182d77359bf4f"
     },
     "VERSION": {
       "sha256": "bb7320d831e7a151aa901c35e7326c752fa2ef5024f30768c42319b8bed171ed",

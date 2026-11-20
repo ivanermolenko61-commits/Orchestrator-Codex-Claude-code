@@ -3412,6 +3412,18 @@ def cand_mode(u):
     return bool(u.get('branch'))
 
 
+def direct_author_subject(task, uid, tip, record=False):
+    """Bind a direct author's submission to an exact SHA before coordinator handoff."""
+    u = task.unit(uid)
+    subject = {'author': u['author'], 'sha': tip}
+    if LEAD == u['author']:
+        if record:
+            u['direct_author'] = subject
+            task.save()
+        return True
+    return u.get('direct_author') == subject
+
+
 def vacuous(task, uid):
     """Единица без файлов, вызовов, кандидата, вердикта и изменений в своей области (вся ветка задачи за вычетом файлов других единиц), при
     наличии другой единицы: так выглядит `main`, созданная start для чисто серверной задачи, когда работа идёт единицей со списком файлов.
@@ -3808,9 +3820,10 @@ def _do_review(task, uid, effort, full, opts, holder):
         tip = u['candidate']
         need(git(root, 'merge-base', '--is-ancestor', u['base'], tip, check=False).returncode == 0, 'база единицы не предок кандидата')
     else:
-        need(LEAD == u['author'], f'{uid}: прямую реализацию принимает чат автора {u["author"]}; '
-             'текущий тимлид не автор этой единицы — используй закреплённого автора через author/cycle или вернись в его чат')
         tip = git(root, 'rev-parse', 'HEAD')
+        need(direct_author_subject(task, uid, tip, record=True),
+             f'{uid}: прямую реализацию фиксирует чат автора {u["author"]} командой checks {uid}; '
+             'после этого любой координатор может отправить тот же SHA на review. Новый SHA требует новой авторской фиксации')
         need(git(root, 'merge-base', '--is-ancestor', u['base'], tip, check=False).returncode == 0, 'база единицы не предок HEAD (смена ветки/rebase?)')
         need(tip != u['base'], 'нет коммитов с начала единицы')
         if git(root, 'status', '--porcelain', '--untracked-files=no'):
@@ -4115,6 +4128,8 @@ def cmd_checks(a):
     tip = (u['merged'] or u['candidate']) if cand_mode(u) else git(t.root, 'rev-parse', 'HEAD')
     need(tip and tip != u['base'], f'{uid}: нет кандидата/коммитов задачи')
     c = apply_checks(t, uid, tip)
+    if not cand_mode(u) and LEAD == u['author']:
+        direct_author_subject(t, uid, tip, record=True)
     say(f'Проверки {uid} на {tip[:10]}: ' + ('ПРОШЛИ' if c['ok'] else 'НЕ ПРОШЛИ' if c['ok'] is False else 'не применялись') + chr(10) + c['tail'])
     return 0 if c['ok'] or c.get('waived') else 1
 
