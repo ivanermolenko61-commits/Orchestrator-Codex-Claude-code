@@ -2716,7 +2716,37 @@ def guard_config(root, base, tip):
     need(CONFIG_PATH not in names, f'коммиты задачи меняют {CONFIG_PATH}: конфигурация проверок берётся только из базы — вынеси правку в отдельную задачу')
 
 
+def check_kinds(root, kind, base, tip):
+    """Category plus every changed file class, using only the trusted base masks."""
+    cfg = trusted_config(root, base)
+    kinds = {'frontend' if kind == 'frontend' else 'backend'}
+    names = git(root, 'diff', '--no-ext-diff', '--no-renames', '--name-only', '-z', base, tip).split('\0')
+    for name in filter(None, names):
+        for category, defaults in (('frontend', DEFAULT_FRONT), ('backend', DEFAULT_BACK)):
+            if any(fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(PurePosixPath(name).name, pat)
+                   for pat in cfg.get(category, defaults)):
+                kinds.add(category)
+                break
+    return sorted(kinds)
+
+
 def run_checks(root, kind, base, tip):
+    kinds = check_kinds(root, kind, base, tip)
+    suites = {k: run_check_suite(root, k, base, tip) for k in kinds}
+    if len(suites) == 1:
+        return {**next(iter(suites.values())), 'suites': kinds}
+    results = list(suites.values())
+    return {'configured': all(c['configured'] for c in results),
+            'ok': False if any(c.get('ok') is False for c in results) else
+                  True if all(c.get('ok') is True for c in results) else None,
+            'blocker': '; '.join(c['blocker'] for c in results if c.get('blocker')) or None,
+            'tail': '\n'.join(k + ': ' + c.get('tail', '') for k, c in suites.items())[-TAIL_CHARS * 2:],
+            'commands': [cmd for c in results for cmd in c.get('commands', [])],
+            'base': base, 'suites': kinds, 'suite_results': suites,
+            'stage': {k: round(sum(c.get('stage', {}).get(k, 0) for c in results), 1) for k in ('export_s', 'run_s')}}
+
+
+def run_check_suite(root, kind, base, tip):
     """Механические проверки точного SHA кандидата в контейнере. Конфигурация — из базы задачи; кандидат её менять не может.
     Красная команда сравнивается с базой: красная и на базе — это не вина кандидата, но и не подтверждение (ok=None)."""
     cfg, cmds, blocker, docker, image_id = checks_env(root, kind, base)
@@ -3071,6 +3101,8 @@ def apply_partial(task, uid, tip):
     if not PARTIAL_ON or waiver_valid(task, uid):
         return None
     kind = 'frontend' if u['kind'] == 'frontend' else 'backend'
+    if len(check_kinds(task.root, kind, u['base'], tip)) != 1:
+        return None   # one partial selection cannot establish coverage of several suites
     cfg, cmds, blocker = checks_env(task.root, kind, u['base'])[:3]
     if blocker:
         return None
@@ -3111,7 +3143,15 @@ def has_partial(u, tip):
 
 def full_green(task, uid, tip):
     c = task.unit(uid)['checks']
-    return bool(c and c['sha'] == tip and ((c.get('configured') and c.get('ok') is True and not c.get('partial')) or c.get('waived')))
+    return bool(c and c['sha'] == tip and ((c.get('configured') and c.get('ok') is True and not c.get('partial')
+                and checks_cover(task, uid, tip, c)) or c.get('waived')))
+
+
+def checks_cover(task, uid, tip, checks):
+    u = task.unit(uid)
+    required = set(check_kinds(task.root, u['kind'], u['base'], tip))
+    recorded = set(checks.get('suites', ['frontend' if u['kind'] == 'frontend' else 'backend']))
+    return required <= recorded
 
 
 def settle_full_green(task, uid, tip):
@@ -3348,7 +3388,9 @@ def auto_sections(entries):
 def unit_has_checks(task, uid):
     u = task.unit(uid)
     base = u['base'] or git(task.root, 'rev-parse', 'HEAD')
-    return bool((trusted_config(task.root, base).get('checks') or {}).get('frontend' if u['kind'] == 'frontend' else 'backend'))
+    tip = u.get('candidate') or git(task.root, 'rev-parse', 'HEAD')
+    configured = trusted_config(task.root, base).get('checks') or {}
+    return any(configured.get(k) for k in check_kinds(task.root, u['kind'], base, tip))
 
 
 def waiver_valid(task, uid):
@@ -3384,7 +3426,7 @@ def verification(task, uid):
     u = task.unit(uid)
     tip = (u['merged'] or u['candidate']) if cand_mode(u) else u['reviewed']   # влитая слиянием единица подтверждается на итоговом SHA
     c = u['checks']
-    if c and c.get('configured') and c.get('ok') is True and c['sha'] == tip:
+    if c and c.get('configured') and c.get('ok') is True and c['sha'] == tip and checks_cover(task, uid, tip, c):
         return 'checks'
     return 'waived' if waiver_valid(task, uid) else None
 
@@ -3650,7 +3692,8 @@ def do_author(task, uid, effort, wait=0):
                      launcher, parse_author(u['files']), subject={'base': expected}, legacy_ok=lambda t: True)
     validate_and_write(task, uid, res, n)
     accept_author(task, uid, res, n, git(wt, 'rev-parse', 'HEAD'))
-    say(f'Автор Codex ({MODEL}/{effort}), раунд {n}: кандидат {u["candidate"][:10]}. {res["notes"][:300]}')
+    model = MODEL if u['author'] == 'codex' else qwen_cli.MODEL
+    say(f'Автор {u["author"]} ({model}/{effort}), раунд {n}: кандидат {u["candidate"][:10]}. {res["notes"][:300]}')
     return n
 
 
@@ -3744,7 +3787,7 @@ def do_review(task, uid, effort, full, opts=None):
 
 
 def _do_review(task, uid, effort, full, opts, holder):
-    """opts — признаки и ручной профиль Claude-reviewer (complexity, risk, model, reason); effort задан явно — ручной effort (для Codex — его effort)."""
+    """Review with the unit's pinned service and explicitly selected effort."""
     opts = {**(opts or {})}
     if effort in EFFORTS:
         opts.setdefault('effort', effort)
@@ -3754,10 +3797,12 @@ def _do_review(task, uid, effort, full, opts, holder):
     fe = u['reviewer'] == 'qwen'
     need(not opts.get('model'), 'Модели закреплены: Codex ' + MODEL + ', Qwen ' + qwen_cli.MODEL)
     if cand_mode(u):
-        need(u['candidate'], f'{uid}: нет кандидата — сначала ' + ('author/cycle' if fe else f'author-claude {uid} или cycle {uid} --task-file F'))
+        need(u['candidate'], f'{uid}: нет кандидата — сначала author {uid} или cycle {uid}')
         tip = u['candidate']
         need(git(root, 'merge-base', '--is-ancestor', u['base'], tip, check=False).returncode == 0, 'база единицы не предок кандидата')
     else:
+        need(LEAD == u['author'], f'{uid}: прямую реализацию принимает чат автора {u["author"]}; '
+             'текущий тимлид не автор этой единицы — используй закреплённого автора через author/cycle или вернись в его чат')
         tip = git(root, 'rev-parse', 'HEAD')
         need(git(root, 'merge-base', '--is-ancestor', u['base'], tip, check=False).returncode == 0, 'база единицы не предок HEAD (смена ветки/rebase?)')
         need(tip != u['base'], 'нет коммитов с начала единицы')
@@ -4103,6 +4148,9 @@ def cmd_rethink(a):
 
 
 def cmd_profile(a):
+    need(not any(getattr(a, key, None) is not None for key in
+                 ('effort', 'applied', 'complexity', 'risk', 'model', 'reason')),
+         'profile только показывает закреплённый сервис; старые параметры не применяются. Effort задавай в author/cycle/review')
     t = Task(repo_root()).load()
     u = t.unit(a.uid)
     service = u['author' if a.role == 'author' else 'reviewer']

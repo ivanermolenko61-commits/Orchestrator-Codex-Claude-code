@@ -37,8 +37,8 @@
       "git_blob": "88f50b4b701478fb5da86b754af40853397689dd"
     },
     "AGENTS.md": {
-      "sha256": "38193ff17b0ef9b67f2cbb210fc3524a59a4f914f2eca212696538d6163ff15b",
-      "git_blob": "9d971be717fe4b0815c91fdd841b6f97b3ad1ad1"
+      "sha256": "ee5726863135aeb9180e729ada2e1870e6dd24d37b1e45cc2fb77f4818031349",
+      "git_blob": "5963194144b2490508a1414fedd15684b3640a42"
     },
     "docs/benchmarks/2026-11-11-baseline-1.5.0.md": {
       "sha256": "1e68f6caff5016d4cd73427a54ce7616ffb88ff6385a863a471bee2ab4b56dd3",
@@ -47,6 +47,10 @@
     "docs/benchmarks/2026-11-20-codex-qwen.md": {
       "sha256": "9d4147914c7e359c9aac7a9e8441ba37597ff6ba892d559d044da55a9847b91d",
       "git_blob": "a55988bcaa06a3f6e2dcd558e2a2a59e6c3a4952"
+    },
+    "docs/release-codex-qwen.md": {
+      "sha256": "971c6627fc289f83cdb6348d1e60b5beed3d98748aac385376094373395c393a",
+      "git_blob": "435b7506e62c9864d643445339e680a0d59e475f"
     },
     "global/agents/coder.md": {
       "sha256": "8a44c6ff262d2e3a11712a8c76912243c4c444809270795af66df4ce16314058",
@@ -65,8 +69,8 @@
       "git_blob": "cb6762f73194aa0f4d8bab3ba4f3629fe0b56917"
     },
     "global/scripts/agentsrules.py": {
-      "sha256": "af8e36ffcc4c931b8b09cbb55a98dc3d11243c7502204c78fe3a4e98bd03a270",
-      "git_blob": "1ede39bef1f8edcd6761f51a106f6fcd62c57c69"
+      "sha256": "410a4b4055ed9f5ee275615a4329cd94bec3fd3b495810838999ec6b083cd50b",
+      "git_blob": "89edff9399e1af363ea62d674b01cfc9323e4c0a"
     },
     "global/workflow/executor-rules.md": {
       "sha256": "e14068958c250d0113c0f0cf02205b2e02bdbdc1a8d72d3a191abb4b7e57698f",
@@ -89,8 +93,8 @@
       "git_blob": "e4e371704c29f3bd9812fbb358082e7760124d7e"
     },
     "scripts/install-pair.py": {
-      "sha256": "ba23b627b161ac2789f59da01abb86d646f4d8dfa4931a4e6da196a82040691e",
-      "git_blob": "ad18df6bf58e417ce374562db7998e20b604a6ab"
+      "sha256": "d5414a0ee338b338b5ed594d9c09c069af75ba2cb2b5cdfd9001be0d055dfac6",
+      "git_blob": "835cc56dd34f6bacf8d06fa22f98e33d8cfacf89"
     },
     "scripts/manifest.py": {
       "sha256": "5c8d5ee365367ac5ea148281d631befaac7136a6826b64839c38dd3fe132655a",
@@ -101,20 +105,20 @@
       "git_blob": "f5683b1af358ca61e9600f4b4547af176ca18d38"
     },
     "scripts/test-install-pair.py": {
-      "sha256": "e02fd25c3823f940f0cf517d1b4bfae4e86396716540bd6254b2a77c62b9e6e4",
-      "git_blob": "10d45d0c88d4cab76ae57ba681f003c34036a057"
+      "sha256": "cf5534be3fb2ed26352a6adb9c914f79f4bfed639b7f475ba977af852f9374f8",
+      "git_blob": "4026e80dcb8ad6ee5b519c9cea9933937a1cea38"
     },
     "skills/agentq/agentq_global.py": {
-      "sha256": "e0c8e5a444132925beacf25cf44b8d56506d80b303e17d972e756acb95504f4b",
-      "git_blob": "6cee939073e63bd6aeb832dbc6181f62b41a5c73"
+      "sha256": "d9d893986db05318df7aa76c8b920576e17752e7eeef745faf84d0de538976c5",
+      "git_blob": "f35a1ffd2c476ceb8328103a7d5991b11bee918d"
     },
     "skills/agentq/codex-review.sh": {
       "sha256": "c78dc298bb0520f6c4c76b60133b3628d715e1db9947ed4ccb2a245a49ae4a3e",
       "git_blob": "cb0ab9fbe888925f8d53cd716d714841454bb898"
     },
     "skills/agentq/qwen_cli.py": {
-      "sha256": "f05a0c482e07c891f111bbabd239ff59da77bac7cd4bb667d7545acea4dd777b",
-      "git_blob": "bd310b485947fd11a5c62ce6e043361d227f99c0"
+      "sha256": "7fa21a85e229ebeab6be57b12124d23d5dafb59399639c3221a88de0cd4462a8",
+      "git_blob": "cf246925f927d06174c9af4371758a16a99accc0"
     },
     "skills/agentq/reference/budget.md": {
       "sha256": "f267298a7b9175a4a6aa1319c0a026c3004d1f68399df26012bed534e83aaaec",
@@ -145,12 +149,12 @@
       "git_blob": "ad1448b14294f8d00c996923a3ea100f515f4dde"
     },
     "skills/agentq/selftest_pair.py": {
-      "sha256": "936808f190fa5eb9f3fc4a852ed5e28c93a7def05d11a811fa164f0d5ecb5e18",
-      "git_blob": "557800b86c51d44511502b6eba24fdf82df2f51a"
+      "sha256": "2ef83a3d2a7b4047f22f458a1055b995e9e34a5060f84679e729060516813e25",
+      "git_blob": "4828d1d256fa7787fb9934663162d1e6931a85a9"
     },
     "skills/agentq/SKILL.md": {
-      "sha256": "66c13b07ae102e91a2815a706754b036baedc0286a84978507fb1bf7da4183f2",
-      "git_blob": "4a246c87e6280fae16563373c31048ec66f89935"
+      "sha256": "166ff93bcd739355edd9d0ce165656e2f9e6df28c20cf45d2f783774c0de88ea",
+      "git_blob": "3ab1818645d084abcc34c907f30626dc0203d9b4"
     },
     "VERSION": {
       "sha256": "bb7320d831e7a151aa901c35e7326c752fa2ef5024f30768c42319b8bed171ed",

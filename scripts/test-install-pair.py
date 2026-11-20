@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location('installer', ROOT / 'scripts/install-pair.py')
@@ -13,6 +14,16 @@ spec.loader.exec_module(installer)
 
 
 class InstallTests(unittest.TestCase):
+    def test_reparse_points_on_older_python(self):
+        from types import SimpleNamespace
+        path = SimpleNamespace(is_symlink=lambda: False, exists=lambda: True,
+                               lstat=lambda: SimpleNamespace(st_file_attributes=0x400))
+        with patch.object(installer.os, 'name', 'nt'):
+            self.assertTrue(installer.linked(path))
+        path.lstat = lambda: SimpleNamespace(st_file_attributes=0)
+        with patch.object(installer.os, 'name', 'nt'):
+            self.assertFalse(installer.linked(path))
+
     def test_install(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

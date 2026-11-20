@@ -33,7 +33,9 @@ class PairTests(unittest.TestCase):
                     else:
                         p.script('qwen', [{'files': files, 'usage': {'input_tokens': 11, 'output_tokens': 22}}])
                         p.script('codex', [{'json': PASS}])
-                    self.command(p, 'cycle', 'code')
+                    output = self.command(p, 'cycle', 'code')
+                    model = e.MODEL if author == 'codex' else q.MODEL
+                    self.assertIn(f'Автор {author} ({model}/high)', output)
                     before = (p.repo / '.ai/task/state.json').read_bytes()
                     data = json.loads(self.command(p, 'status', '--json'))
                     self.assertEqual(data['units']['code']['author'], author)
@@ -84,6 +86,59 @@ class PairTests(unittest.TestCase):
             with e.execution_slot(tmp):
                 pass
 
+    def test_direct_wrong_lead_cannot_self_review(self):
+        p = fixture.Proj('pair-direct-identity')
+        self.command(p, 'start', 'direct', '--author', 'qwen')
+        p.commit('backend/app.py', 'def add(a,b):\n    return a+b+1\n')
+        p.env['AGENTQ_LEAD'] = 'codex'
+        rc, out, err = p.cr('review')
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn('чат автора qwen', out + err)
+        self.assertFalse(p.calls())
+        p.env['AGENTQ_LEAD'] = 'qwen'
+        p.script('codex', [{'json': PASS}])
+        self.command(p, 'review')
+        p.env['AGENTQ_LEAD'] = 'codex'
+        self.command(p, 'finish')
+
+    def test_cross_class_checks_and_waiver(self):
+        p = fixture.Proj('pair-check-coverage')
+        self.command(p, 'start', 'cross class', '--author', 'qwen')
+        p.commit('frontend/src/App.tsx', fixture.APP_V1)
+        t = e.Task(p.repo).load()
+        tip = p.git('rev-parse', 'HEAD')
+        self.assertEqual(e.check_kinds(p.repo, 'backend', t.unit('main')['base'], tip), ['backend', 'frontend'])
+        seen = []
+        def suite(root, kind, base, sha):
+            seen.append((kind, sha))
+            return {'configured': True, 'ok': kind != 'frontend', 'tail': kind, 'commands': []}
+        with patch.object(e, 'run_check_suite', side_effect=suite):
+            result = e.run_checks(p.repo, 'backend', t.unit('main')['base'], tip)
+        self.assertFalse(result['ok'])
+        self.assertEqual(seen, [('backend', tip), ('frontend', tip)])
+        t.unit('main')['checks'] = {'configured': True, 'ok': True, 'sha': tip}
+        self.assertFalse(e.full_green(t, 'main', tip))
+        t.unit('main')['checks']['suites'] = ['backend', 'frontend']
+        self.assertTrue(e.full_green(t, 'main', tip))
+        with patch.object(e, 'trusted_config', return_value={'checks': {'frontend': [['true']]}}):
+            self.assertTrue(e.unit_has_checks(t, 'main'))
+
+    def test_npm_qwen_discovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = Path(tmp) / 'node_modules/@qwen-code/qwen-code/cli.js'
+            cli.parent.mkdir(parents=True)
+            cli.write_text('// fixture')
+            def which(name):
+                return str(Path(tmp) / ('qwen.cmd' if name == 'qwen' else 'node.exe'))
+            with patch.dict(os.environ, {'QWEN_BIN': ''}), patch.object(q.shutil, 'which', side_effect=which):
+                self.assertEqual(q.discover(e.split_bin), [which('node'), str(cli)])
+
+    def test_profile_rejects_inert_arguments(self):
+        p = fixture.Proj('pair-profile')
+        self.command(p, 'start', 'profile')
+        self.command(p, 'profile', 'main', 'author')
+        self.assertEqual(p.cr('profile', 'main', 'author', '--effort', 'low')[0], 2)
+
     def test_qwen_events_and_usage(self):
         base = [{'type': 'system', 'subtype': 'init', 'model': q.MODEL, 'tools': ['structured_output'], 'mcp_servers': []},
                 {'type': 'assistant', 'message': {'model': q.MODEL, 'content': [{'type': 'tool_use', 'name': 'structured_output', 'input': PASS}]}},
@@ -100,6 +155,9 @@ class PairTests(unittest.TestCase):
                            lambda v: v[0].pop('tools'),
                            lambda v: v[1]['message'].update(model='another-model'),
                            lambda v: v[1]['message']['content'][0].update(name='read_file'),
+                           lambda v: v[1].update(message='invalid'),
+                           lambda v: v[1]['message'].update(content=['invalid']),
+                           lambda v: v[1]['message'].update(model=42),
                            lambda v: v[-1].update(is_error=True),
                            lambda v: v[-1].pop('structured_result')):
                 value = copy.deepcopy(base)
@@ -109,6 +167,15 @@ class PairTests(unittest.TestCase):
                     q.parse_events(e, path)
             save([{'type': 'result', 'subtype': 'error'}])
             self.assertIsNone(q.usage(path))
+            value = copy.deepcopy(base)
+            answer = {**PASS, 'summary': 'Unicode\u2028separator\u2029preserved'}
+            value[1]['message']['content'][0]['input'] = answer
+            value[-1]['structured_result'] = answer
+            path.write_text('\n'.join(json.dumps(v, ensure_ascii=False) for v in value), encoding='utf-8')
+            self.assertEqual(json.loads(q.parse_events(e, path)), answer)
+            path.write_text('{invalid', encoding='utf-8')
+            with self.assertRaises(e.Blocked):
+                q.parse_events(e, path)
 
     def test_missing_cache_is_unknown(self):
         usage = {}

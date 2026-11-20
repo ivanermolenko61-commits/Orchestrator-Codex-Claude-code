@@ -28,7 +28,7 @@ def events(path):
         if len({k for k, _ in pairs}) != len(pairs):
             raise ValueError('Qwen: duplicate JSON key')
         return dict(pairs)
-    return [json.loads(line, object_pairs_hook=unique) for line in Path(path).read_text(encoding='utf-8').splitlines() if line.strip()]
+    return [json.loads(line, object_pairs_hook=unique) for line in Path(path).read_text(encoding='utf-8').split('\n') if line.strip()]
 
 
 def usage(path):
@@ -43,24 +43,33 @@ def usage(path):
 
 
 def parse_events(engine, path, model=MODEL):
-    evs = events(path)
+    try:
+        evs = events(path)
+    except (OSError, ValueError) as exc:
+        engine.need(False, f'Qwen: invalid event stream ({exc.__class__.__name__})')
     result, seen, output, initialized = None, set(), None, False
+    def record_model(value):
+        if value is not None:
+            engine.need(isinstance(value, str) and bool(value), 'Qwen: invalid model')
+            seen.add(value)
     for ev in evs:
         engine.need(isinstance(ev, dict), 'Qwen: invalid event')
         if ev.get('type') == 'system' and ev.get('subtype') == 'init':
             engine.need(not initialized, 'Qwen: duplicate init')
             initialized = True
-            if ev.get('model'):
-                seen.add(ev['model'])
             engine.need(ev.get('mcp_servers') == [] and ev.get('tools') == ['structured_output'], 'Qwen: unexpected tools/MCP in init')
-        if ev.get('model'):
-            seen.add(ev['model'])
+        record_model(ev.get('model'))
         # structured_output is the synthetic schema completion, never an executable tool.
         if ev.get('type') == 'assistant':
             engine.need(initialized and result is None, 'Qwen: assistant outside initialized session')
-            if (ev.get('message') or {}).get('model'):
-                seen.add(ev['message']['model'])
-            for block in (ev.get('message') or {}).get('content') or []:
+            message = ev.get('message')
+            engine.need(message is None or isinstance(message, dict), 'Qwen: invalid message')
+            message = message or {}
+            record_model(message.get('model'))
+            content = message.get('content', [])
+            engine.need(isinstance(content, list), 'Qwen: invalid content')
+            for block in content:
+                engine.need(isinstance(block, dict) and isinstance(block.get('type'), str), 'Qwen: invalid content block')
                 if block.get('type') == 'tool_use':
                     engine.need(block.get('name') == 'structured_output', 'Qwen: executable tool call rejected')
                     output = block.get('input')

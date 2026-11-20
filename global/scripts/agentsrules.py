@@ -46,6 +46,9 @@ BASE_READ_RULES = [
 # Правка: эти запреты стоят в конце списка, поэтому проект их не отменит.
 BASE_EDIT_RULES = [
     # секреты
+    ("*auth.json", "deny"),
+    ("*subscription_credentials.json", "deny"),
+    ("*oauth_creds.json", "deny"),
     ("*.env", "deny"),
     ("*.env.*", "deny"),
     ("*.pem", "deny"),

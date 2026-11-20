@@ -13,7 +13,7 @@
 ## Защищённые зоны
 
 - `skills/agentq/*`, установщики, `package-manifest.json`, `VERSION`, `.agents/agentq.json`: правит тимлид; исполняемую логику независимо принимает другой сервис вне изменяемого движка. Для этой интеграции автор Codex, reviewer Qwen.
-- Базовые запреты задаёт `~/.claude/scripts/agentsrules.py`.
+- Базовые запреты новой пары задаёт `~/.agents/skills/agentq/agentsrules.py` (источник `global/scripts/agentsrules.py`); `~/.claude/scripts/agentsrules.py` относится к исторической установке.
 
 ## Проверки
 

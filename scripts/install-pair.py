@@ -3,11 +3,21 @@
 import argparse
 import datetime
 import json
+import os
 import shutil
+import stat
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def linked(path):
+    if path.is_symlink():
+        return True
+    if os.name == 'nt' and path.exists():
+        return bool(path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
 
 
 def planned_files(home):
@@ -37,7 +47,7 @@ def main(argv=None):
         for parent in (path, *path.parents):
             if parent == home:
                 break
-            if parent.is_symlink() or (hasattr(parent, 'is_junction') and parent.is_junction()):
+            if linked(parent):
                 parser.error(f'linked installation path: {parent}')
     installed = home / '.agents/skills/agentq/VERSION'
     version = (ROOT / 'VERSION').read_text().strip()
