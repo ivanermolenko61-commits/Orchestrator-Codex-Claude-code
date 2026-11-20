@@ -2738,7 +2738,8 @@ def run_checks(root, kind, base, tip):
             return {'configured': False, 'ok': None, 'tail': '',
                     'blocker': 'Нет проверок для затронутых классов: ' + ', '.join(missing) +
                     '. Добавь соответствующие checks в доверенную базу отдельной задачей или раздели изменения на единицы; '
-                    'waive всей единицы при наличии настроенных проверок недопустим.'}
+                    'при полном отсутствии применимых checks допустим waive с обоснованием; '
+                    'при наличии хотя бы одного настроенного набора waive всей единицы недопустим.'}
     suites = {k: run_check_suite(root, k, base, tip) for k in kinds}
     if len(suites) == 1:
         return {**next(iter(suites.values())), 'suites': kinds}
@@ -3823,7 +3824,9 @@ def _do_review(task, uid, effort, full, opts, holder):
         tip = git(root, 'rev-parse', 'HEAD')
         need(direct_author_subject(task, uid, tip, record=True),
              f'{uid}: прямую реализацию фиксирует чат автора {u["author"]} командой checks {uid}; '
-             'после этого любой координатор может отправить тот же SHA на review. Новый SHA требует новой авторской фиксации')
+             f'зафиксировано {json.dumps(u.get("direct_author"), ensure_ascii=False)}, текущий HEAD {tip}. '
+             'Переключись на уже зафиксированный SHA либо попроси автора проверить и зафиксировать новый HEAD; '
+             'после этого любой координатор может отправить тот же SHA на review')
         need(git(root, 'merge-base', '--is-ancestor', u['base'], tip, check=False).returncode == 0, 'база единицы не предок HEAD (смена ветки/rebase?)')
         need(tip != u['base'], 'нет коммитов с начала единицы')
         if git(root, 'status', '--porcelain', '--untracked-files=no'):
@@ -4130,6 +4133,7 @@ def cmd_checks(a):
     c = apply_checks(t, uid, tip)
     if not cand_mode(u) and LEAD == u['author']:
         direct_author_subject(t, uid, tip, record=True)
+        say(f'Авторская фиксация: {u["author"]} {tip} — этот SHA может отправить на review любой координатор')
     say(f'Проверки {uid} на {tip[:10]}: ' + ('ПРОШЛИ' if c['ok'] else 'НЕ ПРОШЛИ' if c['ok'] is False else 'не применялись') + chr(10) + c['tail'])
     return 0 if c['ok'] or c.get('waived') else 1
 

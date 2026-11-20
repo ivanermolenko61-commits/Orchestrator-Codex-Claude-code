@@ -128,14 +128,18 @@ class PairTests(unittest.TestCase):
                 p.env['AGENTQ_LEAD'] = author
                 self.command(p, 'start', 'direct handoff', '--author', author)
                 tip = p.commit('backend/app.py', 'def add(a,b):\n    return a+b+1\n')
-                self.command(p, 'checks', 'main')
+                output = self.command(p, 'checks', 'main')
+                self.assertIn(f'Авторская фиксация: {author} {tip}', output)
                 record = fixture.rstate(p)['units']['main']['direct_author']
                 self.assertEqual(record, {'author': author, 'sha': tip})
                 p.env['AGENTQ_LEAD'] = reviewer
                 p.commit('backend/app.py', 'def add(a,b):\n    return a+b+2\n')
                 self.command(p, 'checks', 'main')
                 self.assertEqual(fixture.rstate(p)['units']['main']['direct_author'], record)
-                self.assertEqual(p.cr('review')[0], 2)
+                rc, out, err = p.cr('review')
+                self.assertEqual(rc, 2)
+                self.assertIn(tip, out + err)
+                self.assertIn('Переключись на уже зафиксированный SHA', out + err)
                 self.assertFalse(p.calls())
                 # The pinned author owns the next submission; checks binds that SHA.
                 p.env['AGENTQ_LEAD'] = author
@@ -194,7 +198,12 @@ class PairTests(unittest.TestCase):
         p = fixture.Proj('pair-no-suites', config={})
         self.command(p, 'start', 'direct changes without configured suites')
         p.commit('frontend/src/App.tsx', fixture.APP_V1)
-        self.assertEqual(p.cr('checks', 'main')[0], 2)
+        tip = p.commit('backend/app.py', 'def add(a,b):\n    return a+b+1\n')
+        t = e.Task(p.repo).load()
+        self.assertEqual(e.check_kinds(p.repo, t.unit('main')['kind'], t.unit('main')['base'], tip), ['backend', 'frontend'])
+        rc, out, err = p.cr('checks', 'main')
+        self.assertEqual(rc, 2)
+        self.assertIn('при полном отсутствии применимых checks допустим waive', out + err)
         self.command(p, 'waive', 'main', 'No checks configured in this baseline; independent manual validation recorded for this SHA.')
         self.command(p, 'checks', 'main')
         self.assertTrue(fixture.rstate(p)['units']['main']['checks']['waived'])
