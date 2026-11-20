@@ -4215,7 +4215,9 @@ def next_step(t, uid):
         return 'history: finish --abandon; start --continues <id> --author codex|qwen'
     if u['status'] == 'integrated':
         return 'finish (после остальных единиц)'
-    if u['status'] == 'accepted' and cand_mode(u) and accepted(t, uid):
+    if (u['status'] == 'accepted' and cand_mode(u) and u['candidate'] and
+            (u['verdict'] or {}).get('sha') == u['candidate'] and
+            (u['verdict'] or {}).get('value') == 'PASS' and verification(t, uid)):
         return 'integrate ' + uid
     if stop_reason(t, uid, 'author') or stop_reason(t, uid, 'review'):
         return 'проверить бюджет/прогресс; rethink или решение владельца'

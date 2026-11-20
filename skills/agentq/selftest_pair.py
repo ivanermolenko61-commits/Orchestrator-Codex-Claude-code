@@ -39,6 +39,7 @@ class PairTests(unittest.TestCase):
                     before = (p.repo / '.ai/task/state.json').read_bytes()
                     data = json.loads(self.command(p, 'status', '--json'))
                     self.assertEqual(data['units']['code']['author'], author)
+                    self.assertEqual(data['units']['code']['next'], 'integrate code')
                     p.env['AGENTQ_LEAD'] = 'codex' if author == 'qwen' else 'qwen'
                     after = json.loads(self.command(p, 'status', '--json'))
                     self.assertEqual(after['units'], data['units'])

@@ -79,4 +79,5 @@ if __name__=='__main__':
     args = parser.parse_args()
     ROOT = args.output_root.resolve()
     ROOT.mkdir(parents=True, exist_ok=True)
+    os.environ['AQ_WORKTREES'] = str(ROOT / 'worktrees')
     benchmark(args.mode)
