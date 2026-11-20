@@ -1,3 +1,51 @@
+# agentq — Codex + Qwen (кандидат 1.7.0)
+
+Тимлид — текущий чат Codex или Qwen в VS Code. Оба сервиса пишут любой код;
+reviewer — другой сервис. Категория backend/frontend определяет проверки, не модель.
+Claude остаётся на паузе. Основой служит принятый кандидат 1.6.0 `68f7631`.
+
+Установка новой пары после приёмки и подтверждения владельца:
+
+```powershell
+& <python.exe> scripts/install-pair.py             # сверка
+& <python.exe> scripts/install-pair.py --apply     # общий runtime и навыки обоим чатам
+```
+
+Либо `bash scripts/install-global.sh --pair [--apply]`. Изолированная установка:
+`python scripts/install-pair.py --home <временная папка> --apply`.
+Общий runtime: `~/.agents/skills/agentq`, та же инструкция: `~/.qwen/skills/agentq/SKILL.md`.
+Установщик сохраняет прежние файлы в `~/agentq-backups/`, сверяет результат,
+не редактирует личные настройки, входы, MCP и файлы Claude. Для возврата восстановить
+файлы из этого резерва; новые точки входа можно отключить переименованием папок навыков.
+После установки начать новые чаты, чтобы обновился список навыков.
+
+Из исходника: `python skills/agentq/agentq_global.py --lead codex route` (или qwen).
+Маленькая задача: `start "цель" --author codex`, реализация тимлидом, коммит, `review main`, `finish`.
+Для делегирования: `start ... --kind mixed --contract-file F`; `unit code --kind backend --author qwen --files ... --spec-file F`;
+`cycle code`, `integrate code`. До двух независимых исполнителей одновременно, зависимости через `--after`.
+Для продолжения из другого чата сначала `status --json`: роли единиц, кандидаты, замечания и расход не меняются.
+
+Полный порядок: [навык agentq](skills/agentq/SKILL.md). Проверки:
+`python skills/agentq/selftest.py`, `python skills/agentq/selftest_pair.py`,
+`python scripts/test-install-pair.py`, `python scripts/manifest.py check`.
+Модели: Codex gpt-6.1-sol, Qwen qwen4-max, effort по умолчанию high, без fallback.
+CLI обнаруживаются в PATH/расширениях VS Code; overrides CODEX_BIN/QWEN_BIN — путь либо JSON-массив argv.
+Qwen должен быть авторизован по подписке. Наличие CLI не доказывает вход.
+
+Старые задачи читаются status/report. `finish --abandon` архивирует прежнее состояние;
+`start ... --continues <id> --author ...` переносит расход/замечания и требует новой приёмки при смене ролей.
+Неинтегрированные кандидаты остаются в старых worktree/ветках: перед продолжением явно перенести нужные коммиты
+в ветку задачи и проверить новой парой; автоматической интеграции старого PASS нет.
+Ниже — документация прежних выпусков; её назначения Claude/backend и Codex/frontend исторические.
+Без CLAUDE_HOME установщик по умолчанию выбирает новую пару. Историческая раскладка доступна
+только с явно заданным CLAUDE_HOME (для проверки или отдельного согласованного возврата).
+
+Живые результаты и ограничения: [сравнение двух режимов](docs/benchmarks/2026-11-20-codex-qwen.md).
+Воспроизведение: `python scripts/benchmark-pair.py --run-live --output-root <пустой каталог> sequential`,
+затем `parallel` с тем же output-root. Это настоящие платные вызовы CLI и Docker.
+
+---
+
 # Orchestrator Codex + Claude Code — agentq 1.6.0
 
 **Единственный источник оркестратора agentq**: движок, навык, роли, общие защищённые зоны и установщик развиваются и устанавливаются из этого репозитория на любом компьютере. База знаний ai-knowledge хранит только личные правила и контекст и не копирует, не обновляет и не откатывает эти файлы.

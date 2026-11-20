@@ -9,6 +9,16 @@
 # Что требует НОВОЙ сессии Claude Code: agents/*.md (список субагентов читается при старте), CLAUDE.md, обновлённый SKILL.md.
 set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "${1:-}" = --pair ] || [ -z "${CLAUDE_HOME:-}" ]; then
+  if [ "${1:-}" = --pair ]; then shift; fi
+  for py in "py -3" python3 python; do
+    if $py -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+      exec $py "$REPO/scripts/install-pair.py" "$@"
+    fi
+  done
+  echo 'Нужен Python 3.9+; можно запустить scripts/install-pair.py напрямую.' >&2
+  exit 2
+fi
 DEST="${CLAUDE_HOME:-$HOME/.claude}"
 APPLY=0; CORE_ONLY=0
 for a in "$@"; do
@@ -55,7 +65,7 @@ sync_tree "$REPO/global/agents"   "$DEST/agents"
 sync_tree "$REPO/global/workflow" "$DEST/workflow"
 sync_tree "$REPO/global/scripts"  "$DEST/scripts"
 sync_file "$REPO/global/CLAUDE.md" "$DEST/CLAUDE.md"
-for f in SKILL.md agentq_global.py codex-review.sh selftest.py; do sync_file "$REPO/skills/agentq/$f" "$DEST/skills/agentq/$f"; done
+for f in SKILL.md agentq_global.py qwen_cli.py codex-review.sh selftest.py selftest_pair.py; do sync_file "$REPO/skills/agentq/$f" "$DEST/skills/agentq/$f"; done
 sync_tree "$REPO/skills/agentq/reference" "$DEST/skills/agentq/reference"   # справка навыка: читается по ссылке из SKILL.md и сообщений движка
 sync_file "$REPO/VERSION" "$INST_VER_FILE"
 if [ "$diffs" -eq 0 ]; then echo "Установленные копии совпадают с репозиторием."; exit 0; fi

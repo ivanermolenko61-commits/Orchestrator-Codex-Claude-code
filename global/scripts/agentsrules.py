@@ -37,6 +37,9 @@ BASE_READ_RULES = [
     ("*.env.*", "deny"),
     ("*.pem", "deny"),
     ("*.key", "deny"),
+    ("*auth.json", "deny"),
+    ("*subscription_credentials.json", "deny"),
+    ("*oauth_creds.json", "deny"),
     ("*.example", "allow"),
 ]
 
@@ -50,6 +53,9 @@ BASE_EDIT_RULES = [
     # файлы правил и конфиги самих исполнителей
     ("*AGENTS.md", "deny"),
     ("*CLAUDE.md", "deny"),
+    ("*QWEN.md", "deny"),
+    ("*.qwen/*", "deny"),
+    ("*.codex/*", "deny"),
     ("*GEMINI.md", "deny"),
     ("*opencode.json*", "deny"),
     ("*.opencode*", "deny"),

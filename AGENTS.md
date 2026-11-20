@@ -6,19 +6,20 @@
 
 ## Роли и зоны
 
-- Claude Code: тимлид и автор (shell, Python-инструменты, документация).
-- Codex: независимое ревью исполняемой логики; фронтенда в репозитории нет.
+- Тимлид — текущий чат Codex или Qwen. Оба сервиса пишут любой код; reviewer — другой сервис, назначения закрепляются за единицей.
+- Claude Code на паузе: не запускать, настройки и историю сохранять.
 - Принятый движок `skills/agentq/agentq_global.py`, `codex-review.sh`, `selftest.py` не менять без отдельной приёмки (независимая процедура вне самого движка). Неизменённый принятый движок повторно на модельное ревью не отправлять.
 
 ## Защищённые зоны
 
-- `skills/agentq/*` (движок и точка входа), `scripts/install-global.sh`, `package-manifest.json`, `VERSION`, `.agents/agentq.json`: правит только тимлид; изменения исполняемой логики ревьюит Codex.
+- `skills/agentq/*`, установщики, `package-manifest.json`, `VERSION`, `.agents/agentq.json`: правит тимлид; исполняемую логику независимо принимает другой сервис вне изменяемого движка. Для этой интеграции автор Codex, reviewer Qwen.
 - Базовые запреты задаёт `~/.claude/scripts/agentsrules.py`.
 
 ## Проверки
 
 - `bash -n scripts/install-global.sh`
 - `bash scripts/test-install-global.sh` (установка во временный `CLAUDE_HOME`, сверка манифеста)
+- `python scripts/test-install-pair.py` и `python skills/agentq/selftest.py` (офлайн).
 - Выпуск: установка в изолированный каталог и `selftest.py` (офлайн), см. README.
 
 ## Публикация
