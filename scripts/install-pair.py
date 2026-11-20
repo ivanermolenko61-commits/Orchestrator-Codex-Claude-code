@@ -15,8 +15,11 @@ ROOT = Path(__file__).resolve().parent.parent
 def linked(path):
     if path.is_symlink():
         return True
-    if os.name == 'nt' and path.exists():
-        return bool(path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    if os.name == 'nt':
+        try:
+            return bool(path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        except FileNotFoundError:
+            return False
     return False
 
 

@@ -123,6 +123,17 @@ class PairTests(unittest.TestCase):
         self.assertTrue(e.full_green(t, 'main', tip))
         with patch.object(e, 'trusted_config', return_value={'checks': {'frontend': [['true']]}}):
             self.assertTrue(e.unit_has_checks(t, 'main'))
+            with patch.object(e, 'run_check_suite') as runner:
+                result = e.run_checks(p.repo, 'backend', t.unit('main')['base'], tip)
+            runner.assert_not_called()
+            self.assertFalse(result['configured'])
+            self.assertIn('backend', result['blocker'])
+            self.assertIn('отдельной задачей', result['blocker'])
+        p.commit('server/api.js', 'export const value = 1;\n')
+        tip = p.git('rev-parse', 'HEAD')
+        masks = {'frontend': ['*.js'], 'backend': ['server/*.js']}
+        with patch.object(e, 'trusted_config', return_value=masks):
+            self.assertEqual(e.check_kinds(p.repo, 'frontend', t.unit('main')['base'], tip), ['backend', 'frontend'])
 
     def test_npm_qwen_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:

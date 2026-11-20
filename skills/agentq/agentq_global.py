@@ -2726,12 +2726,19 @@ def check_kinds(root, kind, base, tip):
             if any(fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(PurePosixPath(name).name, pat)
                    for pat in cfg.get(category, defaults)):
                 kinds.add(category)
-                break
     return sorted(kinds)
 
 
 def run_checks(root, kind, base, tip):
     kinds = check_kinds(root, kind, base, tip)
+    if len(kinds) > 1:
+        cfg = trusted_config(root, base)
+        missing = [k for k in kinds if not (cfg.get('checks') or {}).get(k)]
+        if missing:
+            return {'configured': False, 'ok': None, 'tail': '',
+                    'blocker': 'Нет проверок для затронутых классов: ' + ', '.join(missing) +
+                    '. Добавь соответствующие checks в доверенную базу отдельной задачей или раздели изменения на единицы; '
+                    'waive всей единицы при наличии настроенных проверок недопустим.'}
     suites = {k: run_check_suite(root, k, base, tip) for k in kinds}
     if len(suites) == 1:
         return {**next(iter(suites.values())), 'suites': kinds}

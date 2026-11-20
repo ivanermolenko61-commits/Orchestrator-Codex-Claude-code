@@ -1,0 +1,28 @@
+{
+  "sha": "0eb0b4b92071470c71e6a45a3689ab06a21c8408",
+  "files": [
+    "AGENTS.md",
+    "docs/benchmarks/2026-11-20-codex-qwen.md",
+    "docs/release-codex-qwen.md",
+    "global/scripts/agentsrules.py",
+    "package-manifest.json",
+    "scripts/benchmark-pair.py",
+    "scripts/install-pair.py",
+    "scripts/test-install-pair.py",
+    "skills/agentq/SKILL.md",
+    "skills/agentq/agentq_global.py",
+    "skills/agentq/qwen_cli.py",
+    "skills/agentq/selftest_pair.py"
+  ],
+  "prompt_bytes": 148772,
+  "prompt_sha256": "d043dcd13173e1315c42f71fb735539a53aa3aac423fe214e96a1ba6525243c7",
+  "model": "qwen4-max",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 40343,
+    "output_tokens": 11481,
+    "cache_read_input_tokens": 512,
+    "total_tokens": 51824
+  },
+  "events_sha256": "96d08bdd2ec399c303bca30000c5638c25554bf60d5a1ddfee4f21b72839b502"
+}

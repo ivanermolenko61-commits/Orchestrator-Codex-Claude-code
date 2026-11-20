@@ -20,9 +20,16 @@ class InstallTests(unittest.TestCase):
                                lstat=lambda: SimpleNamespace(st_file_attributes=0x400))
         with patch.object(installer.os, 'name', 'nt'):
             self.assertTrue(installer.linked(path))
+            path.exists = lambda: False
+            self.assertTrue(installer.linked(path))   # dangling junction: lstat still sees it
         path.lstat = lambda: SimpleNamespace(st_file_attributes=0)
         with patch.object(installer.os, 'name', 'nt'):
             self.assertFalse(installer.linked(path))
+            path.lstat = lambda: (_ for _ in ()).throw(FileNotFoundError())
+            self.assertFalse(installer.linked(path))
+            path.lstat = lambda: (_ for _ in ()).throw(PermissionError())
+            with self.assertRaises(PermissionError):
+                installer.linked(path)   # inspection failure cannot authorize writes
 
     def test_install(self):
         with tempfile.TemporaryDirectory() as tmp:

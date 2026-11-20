@@ -1,0 +1,41 @@
+{
+  "verdict": "PASS",
+  "summary": "Reviewed the supplied migration files (qwen_cli.py transport, agentsrules.py rule additions, install-pair.py, install-global.sh pair branch, tests, SKILL.md/README/AGENTS.md) against the acceptance focus: symmetric author/reviewer independent of language, pinned opposite reviewer, lead switch preserving unit roles, historical spend preserved with fresh acceptance on changed assignments, Claude paused, JSON-only delegated authors with trusted event validation, exact model confirmation without fallback, two-executor limit, installer preservation/backup/downgrade guards. The supplied pair tests and installer code demonstrate these invariants (role matrix, byte-stable state on lead switch, legacy state never relabelled, changed-services PASS reset with inherited calls, two execution slots, model/tool/init/duplicate-result validation, unknown cache stays unknown, personal/Claude files untouched, backups and downgrade refusal). No BLOCKER/MAJOR defect found. Note on payload rendering: the literals \"$ @\", ' @'+schema and 'node_modules/ @qwen-code' all show a space inserted immediately before '@'; the same \"$ @\" appears on an UNCHANGED context line of install-global.sh inherited from accepted 68f7631 (which was accepted and installed live), so this is a transport/sanitization artifact of the review payload, not code introduced by this migration; it was therefore not reported as a defect. Remaining concrete issues are minor: JSONL line splitting on Unicode separators, unvalidated nested event shapes crashing instead of clean rejection, a junction guard that is fail-open on Python 3.9–3.11, credential edit-rule asymmetry, and a stale rules-path reference in AGENTS.md.",
+  "findings": [
+    {
+      "severity": "MINOR",
+      "path": "skills/agentq/qwen_cli.py",
+      "problem": "events() uses str.splitlines(), which splits not only on \\n but also on U+2028/U+2029, \\x85, \\x0b, \\x0c. These characters are legal raw content inside JSON strings, and Node's JSON.stringify (used by the Qwen CLI stream) does not escape U+2028/U+2029.",
+      "scenario": "A Qwen reviewer summary or author file content contains a Unicode line separator (e.g. text copied from a PDF). The single events.jsonl line is split mid-JSON, json.loads raises ValueError: parse_events crashes (paid call consumed, no clean Blocked/recovery message, no permitted retry) and usage() returns None so the spend is recorded as unknown.",
+      "fix": "Split strictly on newline: iterate the open file object or use read_text(...).split('\\n') instead of splitlines(), keeping the empty-line filter."
+    },
+    {
+      "severity": "MINOR",
+      "path": "skills/agentq/qwen_cli.py",
+      "problem": "parse_events validates that each event is a dict but not nested shapes: (ev.get('message') or {}).get(...), block.get(...), and sorted(seen) assume message is a dict, content blocks are dicts, and model values are strings. Malformed values raise AttributeError/TypeError instead of engine.need rejections.",
+      "scenario": "The CLI emits an assistant event with \"message\": \"...\" (string) or a content block that is a string, or a numeric \"model\" field alongside a string one. Instead of a controlled 'Qwen: invalid event' blocker with recovery guidance (code 2 path), the transport dies with an unhandled traceback; the outcome is still fail-closed but the operator loses the documented recovery/receipt messaging.",
+      "fix": "Add engine.need type checks: message must be dict-or-null, content must be a list of dicts, block types/names must be strings, and every seen model value must be a string before adding to the set."
+    },
+    {
+      "severity": "MINOR",
+      "path": "scripts/install-pair.py",
+      "problem": "The 'linked installation path' guard uses parent.is_junction() behind hasattr(). Path.is_junction() exists only from Python 3.12, while the installer advertises and is dispatched with Python 3.9+ (install-global.sh checks >=3.9). On Windows with Python 3.9–3.11, is_symlink() is False for junctions and the hasattr branch silently no-ops, so the junction protection is fail-open on supported interpreters.",
+      "scenario": "Windows, Python 3.11, pre-existing junction inside home (e.g. ~/.agents/skills/agentq -> ~/.claude/skills/agentq). path.resolve().relative_to(home) still passes (target stays inside home), the junction is not detected, and --apply backs up and overwrites the paused Claude installation's agentq files — violating the 'Claude files are never changed' preservation guarantee. Escape outside home is still blocked by resolve()+relative_to, which limits impact.",
+      "fix": "Detect reparse points independently of interpreter version on Windows: os.lstat(parent).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT (guarded by os.name == 'nt'), or fail closed with a clear error when is_junction is unavailable and any parent is a reparse point; do not silently skip the check."
+    },
+    {
+      "severity": "MINOR",
+      "path": "global/scripts/agentsrules.py",
+      "problem": "The migration adds read denies for *auth.json, *subscription_credentials.json and *oauth_creds.json but does not mirror them into BASE_EDIT_RULES. Edit protection for these names exists only indirectly via *.qwen/* and *.codex/*; credential-named files elsewhere in the project remain editable (decide(edit) falls through to the leading '*' allow), and check_diff will not flag them as a protected zone.",
+      "scenario": "A project keeps service credentials in e.g. deploy/service-auth.json or a root-level oauth_creds.json outside .qwen/.codex. A delegated OpenCode executor cannot read it (read deny) but its edit permission resolves to allow, so it can blindly overwrite/corrupt the credential file; with check-diff run without --allowed the change passes as 'ок'.",
+      "fix": "Add ('*auth.json','deny'), ('*subscription_credentials.json','deny'), ('*oauth_creds.json','deny') to the secrets block of BASE_EDIT_RULES so read and edit protection for the pair's credential filenames stay symmetric."
+    },
+    {
+      "severity": "MINOR",
+      "path": "AGENTS.md",
+      "problem": "The unchanged line 'Базовые запреты задаёт ~/.claude/scripts/agentsrules.py' is made stale by the new default layout: install-pair.py installs the rules only to ~/.agents/skills/agentq/agentsrules.py and never creates ~/.claude/scripts on a pair-only machine (Claude is paused).",
+      "scenario": "A fresh machine installed via install-pair.py: an operator or lead following AGENTS.md inspects/edits ~/.claude/scripts/agentsrules.py to audit or adjust base prohibitions, but that file does not exist; the actually enforced copy lives in the shared runtime, so the documented source of truth diverges from enforcement.",
+      "fix": "Update the line to name the pair runtime copy (~/.agents/skills/agentq/agentsrules.py, source global/scripts/agentsrules.py) and note ~/.claude/scripts/agentsrules.py applies only to the historical CLAUDE_HOME layout."
+    }
+  ]
+}

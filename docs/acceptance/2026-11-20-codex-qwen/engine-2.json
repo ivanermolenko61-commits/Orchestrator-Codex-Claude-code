@@ -1,0 +1,48 @@
+{
+  "verdict": "FIX",
+  "summary": "Reviewed the migration diff (Codex+Qwen pair, pinned opposite reviewers, paused Claude, execution slots, carry/acceptance rules) against the accepted baseline. Role pinning, budget carry, receipt/subject binding, no-fallback enforcement and the two-executor lock are implemented correctly and fail closed. However, three concrete MAJOR defects were introduced: (1) decoupling author from language removed the kind/file-class guards but check-suite selection is still solely by unit kind, so cross-language changes can be accepted as 'verified' without ever running the configured checks for that language; (2) for lead-written (non-candidate) units the reviewer is pinned opposite the *declared* author, while the actual writer is the current lead — after a lead switch the same service can write and 'independently' review the same code; (3) qwen_cli.discover's npm fallback path contains a literal stray space ('node_modules/ @qwen-code/...') that can never match a real install, leaving npm-global Qwen on Windows (a .cmd shim, explicitly excluded) undiscoverable and blocking route/start. Plus minor reporting/recovery-guidance regressions. Tests passing does not cover these paths.",
+  "findings": [
+    {
+      "severity": "MAJOR",
+      "path": "skills/agentq/agentq_global.py",
+      "problem": "Check-suite coverage hole: check_unit_files no longer enforces file-class/kind correspondence (old 'серверный файл — kind backend' / 'клиентский файл — kind frontend' guards deleted) and the backend-review role guard ('РОЛЬ: клиентский код пишет Codex…') was removed from _do_review, but run_checks/apply_partial/checks_env still select the suite only by unit kind ('frontend' if u['kind']=='frontend' else 'backend'). Nothing ensures files of the other class get their configured checks.",
+      "scenario": "Trusted config has checks.frontend and checks.backend. Lead creates 'unit ui --kind backend --files web/app.tsx --author codex' (now allowed), or writes .tsx changes directly in the whole-task backend 'main' unit. Author/review pass; only the backend suite runs on the candidate SHA; checks.frontend is never executed for the changed frontend code. integrate/finish report ACCEPTANCE: VERIFIED although the configured frontend checks never ran — a frontend regression ships accepted.",
+      "fix": "Route checks by the actual changed file classes, not only unit kind: for each unit compute classes of its files (classify/pathspec diff) and run every configured suite whose class is touched (or reject units/commits mixing classes without covering suites). Acceptance (verification/finish) must require green results for all applicable suites on the exact SHA."
+    },
+    {
+      "severity": "MAJOR",
+      "path": "skills/agentq/agentq_global.py",
+      "problem": "Independence broken for lead-written units after a lead switch: reviewer is pinned opposite u['author'] (new_unit), but for non-candidate units (small task written directly by the lead, cand_mode False) the actual author is the current LEAD, and nothing checks LEAD == u['author'] at review/acceptance. The baseline could not hit this (single Claude lead); the two-lead migration introduces it.",
+      "scenario": "Task started with --lead qwen (default_author qwen): unit 'main' has author qwen, reviewer codex. Later the Codex lead continues the same task, writes the fix directly into main (the sanctioned small-task path), commits, runs 'review'. Codex reviews Codex-written code, returns PASS; cmd_review marks accepted, finish reports verified — self-review counted as independent acceptance, violating the opposite-pinned-reviewer requirement.",
+      "fix": "For units without an agent candidate (lead-written), enforce at review/accept time that the current LEAD equals u['author'] (so the pinned opposite reviewer differs from the actual writer), or record the actual writer identity per round and require reviewer != writer; otherwise block with an explicit message to reassign the unit or switch leads."
+    },
+    {
+      "severity": "MAJOR",
+      "path": "skills/agentq/qwen_cli.py",
+      "problem": "discover() npm fallback path contains a literal space: Path(found).parent / 'node_modules/ @qwen-code/qwen-code/cli.js'. Real npm layout is 'node_modules/@qwen-code/...' (no space), so this candidate can never satisfy p.is_file(). On Windows an npm-global install resolves via shutil.which to qwen.cmd, which is explicitly excluded, so discovery depends entirely on this broken path or the VS Code extension glob.",
+      "scenario": "Windows machine with Qwen installed via npm -g (qwen.cmd/qwen.ps1 shims) and no qwenlm VS Code extension, QWEN_BIN unset: which('qwen') returns the .cmd → excluded; the spaced node_modules path never exists; extension glob empty → discover returns None → route reports 'Qwen CLI не найден', start is blocked although the CLI is installed. The new pair is unusable in this common configuration.",
+      "fix": "Remove the stray space: 'node_modules/@qwen-code/qwen-code/cli.js' (and audit the adjacent ' @' prefix in the --json-schema argument for the same copy artifact). Add a discovery test with a simulated npm-global .cmd shim layout."
+    },
+    {
+      "severity": "MINOR",
+      "path": "skills/agentq/agentq_global.py",
+      "problem": "do_author's success line is hardcoded to Codex: say(f'Автор Codex ({MODEL}/{effort})…') even when u['author'] == 'qwen', reporting service gpt-6.1-sol for a candidate actually produced by qwen4-max. Receipts/profile.json are correct, but the lead-facing output misattributes service/model, which the acceptance focus explicitly requires to be exact.",
+      "scenario": "unit --author qwen; 'author uid' succeeds; console tells the lead 'Автор Codex (gpt-6.1-sol/high), раунд 1…'. A lead auditing spend/roles from command output (not --json) records the wrong service for the round.",
+      "fix": "Print u['author'] and the matching model: f'Автор {u[\"author\"]} ({MODEL if u[\"author\"]==\"codex\" else qwen_cli.MODEL}/{effort})…'."
+    },
+    {
+      "severity": "MINOR",
+      "path": "skills/agentq/agentq_global.py",
+      "problem": "_do_review's no-candidate error for candidate-mode units still branches on fe (reviewer==qwen) and, when the author is qwen, instructs 'author-claude {uid} или cycle {uid} --task-file F' — author-claude is unconditionally blocked ('Claude на паузе') and --task-file is rejected by cmd_cycle. The recovery guidance points to two dead commands.",
+      "scenario": "Qwen-authored unit: claim created the worktree/branch but the first author call was interrupted before a candidate existed (cand_mode True, candidate None). Lead runs 'review uid' and is told to run author-claude/--task-file; both fail, wasting a recovery cycle instead of the correct 'author uid' / 'cycle uid'.",
+      "fix": "Make the message author-aware: for any delegated author in the new pair suggest 'author {uid}' or 'cycle {uid}'; drop the author-claude/--task-file branch."
+    },
+    {
+      "severity": "MINOR",
+      "path": "skills/agentq/agentq_global.py",
+      "problem": "cmd_profile silently accepts and discards --effort, --applied, --complexity, --risk, --model, --reason: the baseline recorded reported application (applied_reported) and coordinator features in the unit route log; the new implementation only prints fixed 'effort high' and writes nothing, with no warning that the arguments were ignored.",
+      "scenario": "Lead runs 'profile uid author --effort low --applied \"qwen4-max actually launched\"' believing the effort choice and reported application are journaled (as before). Nothing is saved; later audit of route log/receipts finds no trace of the reported effort/application, and the printed 'effort high' contradicts the requested low without explanation.",
+      "fix": "Either reject the now-inert arguments with an explicit 'устарел/не применяется' message, or keep recording --applied/features in the route log as before and print the effective effort semantics; do not accept-and-drop silently."
+    }
+  ]
+}

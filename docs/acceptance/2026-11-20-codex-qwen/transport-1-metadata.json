@@ -1,0 +1,25 @@
+{
+  "sha": "eb2886695e1a50d5bf94e047a3a94429a6106350",
+  "files": [
+    "skills/agentq/qwen_cli.py",
+    "global/scripts/agentsrules.py",
+    "scripts/install-pair.py",
+    "scripts/install-global.sh",
+    "scripts/test-install-pair.py",
+    "skills/agentq/selftest_pair.py",
+    "skills/agentq/SKILL.md",
+    "README.md",
+    "AGENTS.md"
+  ],
+  "prompt_bytes": 133441,
+  "prompt_sha256": "04d06cba7e4da065c1b976143e24b14f9828a20d4407b75a1fe763a19dfdcf9f",
+  "model": "qwen4-max",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 32809,
+    "output_tokens": 17473,
+    "cache_read_input_tokens": 0,
+    "total_tokens": 50282
+  },
+  "events_sha256": "191c52ef1d6052940fbeb1be3e951486249132d7f50d739d610459cfea3ac9a3"
+}

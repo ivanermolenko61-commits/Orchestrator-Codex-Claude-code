@@ -1,0 +1,19 @@
+{
+  "sha": "eb2886695e1a50d5bf94e047a3a94429a6106350",
+  "files": [
+    "skills/agentq/agentq_global.py",
+    "skills/agentq/qwen_cli.py",
+    "global/scripts/agentsrules.py"
+  ],
+  "prompt_bytes": 441034,
+  "prompt_sha256": "4e72e7f482e8b25afeb356fa0586406747d353710c7c0a4a3a709514347459de",
+  "model": "qwen4-max",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 124582,
+    "output_tokens": 13735,
+    "cache_read_input_tokens": 0,
+    "total_tokens": 138317
+  },
+  "events_sha256": "b10d3cf4927d6fac107d928a9dd4acd3ca151097dc68df708733fba9bc76688f"
+}
